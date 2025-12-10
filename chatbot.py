@@ -21,9 +21,7 @@ ACTIVIDADES_FILE = os.path.join(DOCS_DIR, "Actividades por area.csv")
 REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACION-PUBLICA-DEL-MUNICIPIO-DE-VERACRUZ.pdf") 
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
 
-# CLAVE API: Se leerá de st.secrets, usando la clave local como último fallback
-# ¡RECUERDA GENERAR UNA CLAVE NUEVA POR SEGURIDAD!
-DEEPSEEK_API_KEY_LOCAL = "sk-NUEVA_CLAVE_GENERADA_DEEPSEEK" 
+# LA CLAVE API SE LEE DIRECTAMENTE DE st.secrets["deepseek_api_key"]
 
 
 # --- DEFINICIÓN DEL PROMPT MAESTRO (PERSONALIDAD DE PROGOB) ---
@@ -195,16 +193,14 @@ def load_area_context(user_area):
 
 def get_llm_response(system_prompt: str, user_query: str):
     """
-    Función de conexión a la API, leyendo la clave desde st.secrets e inyectando contexto RAG.
+    Función de conexión a la API, leyendo la clave **SÓLO** desde st.secrets e inyectando contexto RAG.
     """
     try:
-        # Se asume que la clave NUEVA ya fue configurada en secrets.toml
+        # 🌟 Lectura exclusiva de la clave desde Streamlit Secrets
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
-        api_key = DEEPSEEK_API_KEY_LOCAL
-        if not api_key:
-             st.error("🚨 ERROR: La clave 'deepseek_api_key' no es válida o falta en `secrets.toml`.")
-             return "❌ Conexión fallida. Por favor, verifica tu clave API."
+        st.error("🚨 ERROR: La clave 'deepseek_api_key' no se encuentra en `secrets.toml`.")
+        return "❌ Conexión fallida. Por favor, verifica tu clave API."
     
     # --- INYECCIÓN RAG CRÍTICA ---
     rag_context = ""
@@ -251,10 +247,11 @@ def get_llm_response(system_prompt: str, user_query: str):
             return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
 
     except requests.exceptions.RequestException as e:
+        # Este es el bloque que captura el error 401 Unauthorized si la clave no tiene saldo o está revocada.
         st.error(f"❌ Error en la comunicación con la API. Detalle: {e}")
         return f"❌ Error de comunicación. Detalle: {e}"
     except Exception as e:
-        st.error(f"❌ Error interno al procesar la respuesta: {e}")
+        st.error(f"❌ Error interno al procesar la respuesta. Detalle: {e}")
         return "❌ Error interno. Revisa el código de procesamiento."
 
 
