@@ -5,11 +5,16 @@ import json
 import io
 import requests 
 import re 
-# Importar librerías críticas para RAG. NO importamos gspread ni oauth2client.
+# Importar librerías críticas para Persistencia (funcional) y RAG
 try:
     import pypdf # Librería para leer PDFs
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
 except ImportError:
     pypdf = None
+    gspread = None
+    ServiceAccountCredentials = None
+    
 
 # --- CONFIGURACIÓN GENERAL ---
 st.set_page_config(page_title="Asesor Progob PBR/MML Veracruz", layout="wide")
@@ -21,7 +26,17 @@ ACTIVIDADES_FILE = os.path.join(DOCS_DIR, "Actividades por area.csv")
 REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACION-PUBLICA-DEL-MUNICIPIO-DE-VERACRUZ.pdf") 
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
 
-# LA CLAVE API SE LEE DIRECTAMENTE DE st.secrets["deepseek_api_key"]
+# CLAVE API: Se leerá de st.secrets["deepseek_api_key"]
+
+# CLAVE DE HOJA DE CÁLCULO: Se lee SÓLO de st.secrets["spreadsheet_key"]
+GOOGLE_SHEET_KEY = None
+try:
+    GOOGLE_SHEET_KEY = st.secrets["spreadsheet_key"]
+except KeyError:
+    pass
+
+# Bandera para saber si la persistencia está activa
+PERSISTENCE_ENABLED = gspread is not None and ServiceAccountCredentials is not None and GOOGLE_SHEET_KEY is not None
 
 
 # --- DEFINICIÓN DEL PROMPT MAESTRO (PERSONALIDAD DE PROGOB) ---
@@ -247,7 +262,6 @@ def get_llm_response(system_prompt: str, user_query: str):
             return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
 
     except requests.exceptions.RequestException as e:
-        # Este es el bloque que captura el error 401 Unauthorized si la clave no tiene saldo o está revocada.
         st.error(f"❌ Error en la comunicación con la API. Detalle: {e}")
         return f"❌ Error de comunicación. Detalle: {e}"
     except Exception as e:
@@ -256,23 +270,99 @@ def get_llm_response(system_prompt: str, user_query: str):
 
 
 # --------------------------------------------------------------------------
-# B. FUNCIONES DE PERSISTENCIA (Google Drive/gspread - SIMULADAS)
+# B. FUNCIONES DE PERSISTENCIA (Google Drive/gspread - REAL)
 # --------------------------------------------------------------------------
+
+def get_gspread_client():
+    """Conecta con Google Sheets/Drive usando credenciales de Streamlit Secrets."""
+    # Verificación de librerías y clave de hoja de cálculo
+    if not PERSISTENCE_ENABLED:
+        return None
+        
+    try:
+        creds_dict = st.secrets["gspread"]
+        
+        # CORRECCIÓN: Usar 'scopes' en plural
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            creds_dict, 
+            scopes=['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        )
+        client = gspread.authorize(creds)
+        return client
+        
+    except KeyError as e:
+        st.error(f"❌ Error de configuración: Falta la sección {e} en secrets.toml.")
+        return None
+    except Exception as e:
+        # Esto captura errores de conexión o autenticación de Google
+        st.error(f"❌ Error de autenticación de GDrive: {e}. Revise sus credenciales y permisos de Drive.")
+        return None
 
 def get_pat_file_name(user_area):
     """Genera el nombre de archivo para guardar el avance del PAT."""
     clean_area = re.sub(r'[^a-zA-Z0-9_]', '_', user_area)
-    return f"avance_pat_{clean_area}.json"
+    return f"avance_pat_{clean_area}" # Usaremos el nombre de la UR como clave
 
 def save_pat_progress(user_area, pat_data):
-    """SIMULACIÓN: Guarda el avance del PAT."""
-    file_name = get_pat_file_name(user_area)
-    st.session_state['drive_status'] = f"SIMULACIÓN: Avance guardado: {file_name}. (Persistencia deshabilitada)"
+    """REAL: Guarda el avance del PAT en Google Sheets (Hoja 'PAT_Data')."""
+    client = get_gspread_client()
+    if not client:
+        st.session_state['drive_status'] = "⚠️ Persistencia: Deshabilitada o error de conexión."
+        return
+
+    try:
+        # Abre la hoja por la clave definida en secrets.toml y usa la pestaña 'PAT_Data'
+        sheet = client.open_by_key(GOOGLE_SHEET_KEY).worksheet("PAT_Data") 
+        
+        pat_json_data = json.dumps(pat_data, ensure_ascii=False)
+        area_names = sheet.col_values(1)
+        
+        # 1. Buscar si el usuario (UR) ya existe
+        try:
+            row_index = area_names.index(user_area) + 1 
+            # Si existe, actualiza la columna B (Datos JSON)
+            sheet.update_cell(row_index, 2, pat_json_data) 
+            st.session_state['drive_status'] = f"✅ Persistencia: Avance actualizado para {user_area}."
+        except ValueError:
+             # 2. Si no existe, añade una nueva fila
+             sheet.append_row([user_area, pat_json_data], value_input_option='USER_ENTERED')
+             st.session_state['drive_status'] = f"✅ Persistencia: Nuevo PAT guardado para {user_area}."
+        
+    except Exception as e:
+        st.session_state['drive_status'] = f"❌ Error de Persistencia (Guardar): {e}. Asegura que la hoja 'PAT_Data' existe y tiene permisos."
 
 def load_pat_progress(user_area):
-    """SIMULACIÓN: Carga el avance del PAT."""
-    st.session_state['drive_status'] = "SIMULACIÓN: Persistencia deshabilitada. Iniciando nuevo PAT."
-    return {"problema": None, "proposito": None, "componentes": []}
+    """REAL: Carga el avance del PAT desde Google Sheets."""
+    client = get_gspread_client()
+    if not client:
+        st.session_state['drive_status'] = "⚠️ Persistencia: Deshabilitada o error de conexión."
+        return {"problema": None, "proposito": None, "componentes": []}
+
+    try:
+        sheet = client.open_by_key(GOOGLE_SHEET_KEY).worksheet("PAT_Data") 
+        
+        area_names = sheet.col_values(1)
+        
+        # Buscar la fila del usuario
+        try:
+            row_index = area_names.index(user_area) + 1 
+            pat_json = sheet.cell(row_index, 2).value
+            
+            if pat_json:
+                pat_data = json.loads(pat_json)
+                st.session_state['drive_status'] = f"✅ Persistencia: Avance cargado para {user_area}."
+                return pat_data
+            else:
+                st.session_state['drive_status'] = f"⚠️ Persistencia: Fila encontrada, pero sin datos de PAT para {user_area}."
+                return {"problema": None, "proposito": None, "componentes": []}
+        
+        except ValueError:
+             st.session_state['drive_status'] = f"⚠️ Persistencia: No se encontró la UR '{user_area}' en la hoja 'PAT_Data'. Se iniciará un nuevo PAT."
+             return {"problema": None, "proposito": None, "componentes": []}
+        
+    except Exception as e:
+        st.session_state['drive_status'] = f"❌ Error de Persistencia (Cargar): {e}. Asegura que la hoja 'PAT_Data' existe y tiene permisos."
+        return {"problema": None, "proposito": None, "componentes": []}
 
 
 # --------------------------------------------------------------------------
@@ -324,6 +414,8 @@ def chat_view(user_name, user_area):
              st.session_state.messages.append({"role": "assistant", "content": f"¡Bienvenido de nuevo! Hemos cargado tu avance. Tu Propósito actual es: **{st.session_state.pat_data['proposito'] or 'Pendiente'}**. Estamos en la **Fase: {st.session_state.current_phase.replace('_', ' ')}**."})
              
     st.sidebar.markdown(f"**Estado de Persistencia:** {st.session_state.get('drive_status', 'No verificado.')}")
+    if not PERSISTENCE_ENABLED:
+        st.sidebar.error("⚠️ **Persistencia Deshabilitada** (Faltan librerías o claves en secrets.toml).")
 
 
     # --- 2. Mostrar Historial del Chat ---
@@ -412,7 +504,11 @@ def admin_view(user_name):
     """Interfaz de administración para la gestión de usuarios (Se mantiene por ahora)."""
     st.title(f"Panel de Administrador | {user_name}")
     st.subheader("Gestión de Usuarios y Supervisión de PATs")
-    st.warning("El panel de administración se mantiene. La persistencia está deshabilitada.")
+    if not PERSISTENCE_ENABLED:
+        st.warning("El panel de administración se mantiene. La persistencia está deshabilitada.")
+    else:
+        st.info("La persistencia está activa y funcionando.")
+        
     st.markdown("---")
     df_users = load_users()
     if not df_users.empty:
@@ -430,6 +526,14 @@ def main():
     """Función principal para manejar el login y enrutamiento."""
     df_users = load_users()
     
+    # Muestra la advertencia si faltan los requisitos de persistencia
+    if not PERSISTENCE_ENABLED:
+         if gspread is None or ServiceAccountCredentials is None:
+              st.warning("⚠️ **Advertencia:** Persistencia deshabilitada. Asegúrese de haber instalado las librerías `gspread` y `oauth2client`.")
+         elif GOOGLE_SHEET_KEY is None:
+              st.warning("⚠️ **Advertencia:** Persistencia deshabilitada. Falta la clave `spreadsheet_key` en su `secrets.toml`.")
+
+
     if 'authenticated' not in st.session_state:
         st.session_state['authenticated'] = False
 
