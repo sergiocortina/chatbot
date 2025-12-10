@@ -5,7 +5,16 @@ import json
 import io
 import requests 
 import re 
-from unidecode import unidecode # Necesaria si no está importada en la original
+try:
+    # Usamos try/except para la librería unidecode en caso de que la instalación en el entorno falle, 
+    # aunque es necesaria para la normalización del área de búsqueda en el RAG.
+    from unidecode import unidecode 
+except ImportError:
+    # Si falla, definimos una función dummy que no normaliza (pero puede fallar en la búsqueda RAG)
+    def unidecode(text):
+        return text
+    st.warning("Advertencia: La librería 'unidecode' no está disponible. La búsqueda de actividades por área podría ser menos precisa.")
+    
 # Importar librerías críticas para RAG.
 try:
     import pypdf # Librería para leer PDFs
@@ -154,6 +163,7 @@ def load_area_context(user_area):
         # Intento simplificado para encontrar la sección de atribuciones de la UR
         search_key = user_area.strip().upper()
         # Busca un patrón típico de atribuciones (Artículos, Secciones, Títulos)
+        # Se usará un LLM o una búsqueda heurística más simple en un entorno real. Aquí usamos una heurística.
         match = re.search(r'(TÍTULO|CAPÍTULO|ARTÍCULO)\s+.*' + re.escape(search_key) + r'.*?(ARTÍCULO|CAPÍTULO|TÍTULO|REFORMADO)', reglamento_text, re.DOTALL | re.IGNORECASE)
         
         if match:
@@ -217,6 +227,9 @@ def load_area_context(user_area):
                 else:
                     context["actividades_resumen"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}'. El LLM procederá sin esta referencia."
 
+            else:
+                context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades cargado, pero faltan columnas 'area' o 'actividad'."
+
         except Exception as e:
             context["actividades_resumen"] = f"Error al procesar el archivo de actividades ({ACTIVIDADES_FILE}): {e}"
     else:
@@ -229,7 +242,6 @@ def load_area_context(user_area):
 def get_llm_response(system_prompt: str, user_query: str):
     """
     Función de conexión a la API, leyendo la clave **SÓLO** desde st.secrets e inyectando contexto RAG.
-    (Se mantiene igual)
     """
     try:
         # Lectura exclusiva de la clave desde Streamlit Secrets
@@ -397,7 +409,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
     system_context_rag = f"Contexto de la UR ({user_area}): {st.session_state.area_context['atribuciones_resumen']}. Actividades: {st.session_state.area_context['actividades_resumen']}"
     
     # ----------------------------------------------------------------------
-    # FASE 1: DIAGNÓSTICO (PROBLEMA CENTRAL) - DEFINICIÓN
+    # FASE 1: DIAGNÓSTICO (PROBLEMA CENTRAL) - DEFINICIÓN/PROPUESTA INICIAL
     # ----------------------------------------------------------------------
     if current_phase == 'Diagnostico_Problema_Definicion':
         # 1. Guarda la propuesta del usuario como borrador
@@ -405,42 +417,64 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         
         # Prompt basado en la Guía Metodológica para validación (Módulo 7)
         query_llm = f"""
-        **FASE ACTUAL: Problema (Borrador).** {system_context_rag}
+        **FASE ACTUAL: Problema (Propuesta).** {system_context_rag}
         El usuario propone el Problema Central: "{user_prompt}".
         
         Como Enlace Senior de Progob: 
-        1.  **Explica didácticamente** qué es el Problema Central y por qué es importante su correcta redacción.
+        1.  **Explica didácticamente** qué es el Problema Central y su estructura (población + situación no deseada).
         2.  Usando el Reglamento Interior (RAG), **valida brevemente** si el problema está dentro de las atribuciones de la UR.
-        3.  Usando la Guía Metodológica (RAG) para validar la redacción, evalúa el enunciado. Si el enunciado no cumple la regla de 'población objetivo + situación no deseada' o si es la 'ausencia de un servicio', proponle una redacción ajustada (Opción A, B).
-        4.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. (Ej: Responde 'Acepto la opción A' o 'Propongo la siguiente corrección...').
+        3.  Usando la Guía Metodológica (RAG), evalúa el enunciado. Si la redacción del usuario es correcta, **confirma que es una redacción válida y ajusta la sintaxis si es necesario**. Si el enunciado incumple reglas (es ausencia de servicio, o incluye soluciones), propón una redacción ajustada (Opción A, B).
+        4.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. (Ej: Responde 'Acepto la opción A' o 'Propongo la siguiente corrección...'). **NO AVANCES A CAUSAS/EFECTOS.**
         """
         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
         st.session_state.current_phase = 'Diagnostico_Problema_Validacion'
         
     # ----------------------------------------------------------------------
-    # FASE 2: DIAGNÓSTICO (PROBLEMA CENTRAL) - VALIDACIÓN Y ÁRBOL DE PROBLEMAS
+    # FASE 2: PROBLEMA CENTRAL - VALIDACIÓN FINAL Y GENERACIÓN DE ÁRBOL
     # ----------------------------------------------------------------------
     elif current_phase == 'Diagnostico_Problema_Validacion':
-        # El prompt del usuario es la confirmación/corrección final del problema
+        # 1. El prompt del usuario es la confirmación/corrección final del problema. Lo guardamos como final.
         st.session_state.pat_data['problema'] = user_prompt
         
         query_llm = f"""
-        **FASE ACTUAL: Problema (Confirmado).** {system_context_rag}
+        **FASE ACTUAL: Problema Central (Confirmado).** {system_context_rag}
         El Problema Central FINAL confirmado es: "{user_prompt}".
         
         Como Enlace Senior de Progob: 
-        1.  **Explica didácticamente** qué es el Árbol de Problemas y la diferencia entre Causas Directas e Indirectas. 
-        2.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada.
-        3.  **Guía al usuario** a la siguiente fase: **Propósito**. Explica que el Propósito es la imagen en positivo del Problema Central (efecto espejo).
-        4.  Usando el Propósito (la solución al problema) y las Actividades Previas (RAG), **propón tres opciones de Propósito (Objetivo General)** que se deriven directamente de la solución al problema validado (Opciones A, B, C).
-        5.  Instruye al usuario a seleccionar una opción. (Ej: Responde 'A', 'B', 'C' o 'Propongo un Propósito diferente: [tu propuesta]').
+        1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
+        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas y la diferencia entre Causas Directas e Indirectas.
+        3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
+        4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
-        st.session_state.current_phase = 'Proposito_Definicion'
-
+        # TRANSICIÓN A LA NUEVA FASE: VALIDACIÓN DEL ÁRBOL
+        st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
 
     # ----------------------------------------------------------------------
-    # FASE 3: PROPÓSITO - DEFINICIÓN Y VALIDACIÓN METODOLÓGICA
+    # FASE 3: ÁRBOL DE PROBLEMAS - VALIDACIÓN FINAL Y PROPUESTAS DE PROPÓSITO
+    # ----------------------------------------------------------------------
+    elif current_phase == 'Diagnostico_Arbol_Validacion':
+        # El prompt del usuario es la confirmación/corrección del Árbol de Problemas.
+        
+        problema_final = st.session_state.pat_data.get('problema', 'Problema no definido')
+        
+        query_llm = f"""
+        **FASE ACTUAL: Árbol de Problemas (Confirmado).** {system_context_rag}
+        Problema Central: "{problema_final}".
+        El usuario ha validado o ajustado el Árbol de Problemas (su última respuesta fue: "{user_prompt}").
+        
+        Como Enlace Senior de Progob: 
+        1.  **Felicita al usuario** por completar el Análisis Causal.
+        2.  **Guía al usuario** a la siguiente fase: **Propósito**. Explica que el Propósito es la imagen en positivo del Problema Central (Objetivo General) y la importancia de la Lógica Vertical.
+        3.  Usando el Problema Central ("{problema_final}") y las Actividades Previas (RAG), **propón tres opciones de Propósito** que se deriven directamente de la superación del problema validado (Opciones A, B, C). Deben seguir la sintaxis de la MIR (Beneficiario + verbo en presente + resultado).
+        4.  Instruye al usuario a seleccionar una opción. (Ej: Responde 'A', 'B', 'C' o 'Propongo un Propósito diferente: [tu propuesta]').
+        """
+        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        # TRANSICIÓN A LA FASE: DEFINICIÓN DEL PROPÓSITO
+        st.session_state.current_phase = 'Proposito_Definicion'
+        
+    # ----------------------------------------------------------------------
+    # FASE 4: PROPÓSITO - DEFINICIÓN Y VALIDACIÓN METODOLÓGICA
     # ----------------------------------------------------------------------
     elif current_phase == 'Proposito_Definicion':
         # 1. Guarda la propuesta del usuario como borrador
@@ -461,7 +495,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         st.session_state.current_phase = 'Proposito_Validacion'
 
     # ----------------------------------------------------------------------
-    # FASE 4: PROPÓSITO - CONFIRMACIÓN E INDICADOR RMAE-T
+    # FASE 5: PROPÓSITO - CONFIRMACIÓN E INDICADOR RMAE-T
     # ----------------------------------------------------------------------
     elif current_phase == 'Proposito_Validacion':
         # 1. El prompt del usuario es la validación final del propósito
@@ -482,7 +516,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
 
 
     # ----------------------------------------------------------------------
-    # FASE 5: DEFINICIÓN DE COMPONENTES
+    # FASE 6: DEFINICIÓN DE COMPONENTES
     # ----------------------------------------------------------------------
     elif current_phase == 'Componentes_Definicion':
          
@@ -505,7 +539,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
          st.session_state.current_phase = 'Componentes_Validacion'
          
     # ----------------------------------------------------------------------
-    # FASE 6: VALIDACIÓN DE COMPONENTES Y CIERRE DE MIR
+    # FASE 7: VALIDACIÓN DE COMPONENTES Y CIERRE DE MIR
     # ----------------------------------------------------------------------
     elif current_phase == 'Componentes_Validacion':
         
@@ -543,6 +577,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         # Mapeo de fases y progreso para dar contexto a la IA
         fase_map = {
             'Diagnostico_Problema_Validacion': f"Validación del Problema: **{st.session_state.pat_data.get('problema_borrador', 'N/A')}**",
+            'Diagnostico_Arbol_Validacion': f"Validación del Árbol de Problemas con Problema: **{st.session_state.pat_data.get('problema', 'N/A')}**",
             'Proposito_Validacion': f"Validación del Propósito: **{st.session_state.pat_data.get('proposito_borrador', 'N/A')}**",
             'Componentes_Validacion': f"Validación de Componentes: **{st.session_state.pat_data.get('componentes_borrador', 'N/A')}**"
         }
@@ -587,8 +622,11 @@ def chat_view(user_name, user_area):
     
     # Determinar la fase actual basado en los datos cargados
     if 'current_phase' not in st.session_state:
-        if st.session_state.pat_data.get('problema'):
-            st.session_state.current_phase = 'Proposito_Definicion'
+        if st.session_state.pat_data.get('proposito'):
+            st.session_state.current_phase = 'Componentes_Definicion'
+        elif st.session_state.pat_data.get('problema'):
+            # Si solo hay problema, lo más probable es que tenga que validar el árbol o definir el propósito.
+            st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
         else:
             st.session_state.current_phase = 'inicio'
 
@@ -601,17 +639,17 @@ def chat_view(user_name, user_area):
             
             if st.session_state.pat_data.get('problema'):
                  # Mensaje si se cargó un avance
-                 next_phase = st.session_state.current_phase.replace('_', ' ')
+                 next_phase_text = st.session_state.current_phase.replace('_', ' ')
                  initial_message = f"""
                  ¡Bienvenido de nuevo, **{user_name}**! Hemos cargado tu avance.
 
                  * **Problema Confirmado:** *{st.session_state.pat_data.get('problema', 'N/A')}*
                  * **Propósito Confirmado:** *{st.session_state.pat_data.get('proposito', 'N/A')}*
                  
-                 Continúa en la fase de **{next_phase}**. Ingresa tu siguiente propuesta para avanzar.
+                 Continúa en la fase de **{next_phase_text}**. Ingresa tu siguiente propuesta para avanzar.
                  """
             else:
-                 # Mensaje de inicio de PAT vacío - AHORA RESUMIDO Y CON DESGLOSE
+                 # Mensaje de inicio de PAT vacío - RESUMIDO Y DESGLOSADO
                  initial_message = f"""
                  ¡Hola, **{user_name}**! Soy tu Asesor Senior de Progob. Estamos listos para comenzar la construcción de tu MIR.
                  
