@@ -2,6 +2,6 @@ streamlit
 pandas
 openpyxl
 requests
-gspread
-oauth2client
 pypdf
+gspread       
+oauth2client
