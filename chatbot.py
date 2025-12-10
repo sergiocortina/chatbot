@@ -5,16 +5,11 @@ import json
 import io
 import requests 
 import re 
-# Importar librerías críticas para Persistencia (funcional) y RAG
+# Importar librerías críticas para RAG.
 try:
     import pypdf # Librería para leer PDFs
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
 except ImportError:
     pypdf = None
-    gspread = None
-    ServiceAccountCredentials = None
-    
 
 # --- CONFIGURACIÓN GENERAL ---
 st.set_page_config(page_title="Asesor Progob PBR/MML Veracruz", layout="wide")
@@ -27,16 +22,6 @@ REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACI
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
 
 # CLAVE API: Se leerá de st.secrets["deepseek_api_key"]
-
-# CLAVE DE HOJA DE CÁLCULO: Se lee SÓLO de st.secrets["spreadsheet_key"]
-GOOGLE_SHEET_KEY = None
-try:
-    GOOGLE_SHEET_KEY = st.secrets["spreadsheet_key"]
-except KeyError:
-    pass
-
-# Bandera para saber si la persistencia está activa
-PERSISTENCE_ENABLED = gspread is not None and ServiceAccountCredentials is not None and GOOGLE_SHEET_KEY is not None
 
 
 # --- DEFINICIÓN DEL PROMPT MAESTRO (PERSONALIDAD DE PROGOB) ---
@@ -211,7 +196,7 @@ def get_llm_response(system_prompt: str, user_query: str):
     Función de conexión a la API, leyendo la clave **SÓLO** desde st.secrets e inyectando contexto RAG.
     """
     try:
-        # 🌟 Lectura exclusiva de la clave desde Streamlit Secrets
+        # Lectura exclusiva de la clave desde Streamlit Secrets
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
         st.error("🚨 ERROR: La clave 'deepseek_api_key' no se encuentra en `secrets.toml`.")
@@ -270,99 +255,69 @@ def get_llm_response(system_prompt: str, user_query: str):
 
 
 # --------------------------------------------------------------------------
-# B. FUNCIONES DE PERSISTENCIA (Google Drive/gspread - REAL)
+# B. FUNCIONES DE PERSISTENCIA (LOCAL: DESCARGA/CARGA JSON)
 # --------------------------------------------------------------------------
-
-def get_gspread_client():
-    """Conecta con Google Sheets/Drive usando credenciales de Streamlit Secrets."""
-    # Verificación de librerías y clave de hoja de cálculo
-    if not PERSISTENCE_ENABLED:
-        return None
-        
-    try:
-        creds_dict = st.secrets["gspread"]
-        
-        # CORRECCIÓN: Usar 'scopes' en plural
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            creds_dict, 
-            scopes=['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        )
-        client = gspread.authorize(creds)
-        return client
-        
-    except KeyError as e:
-        st.error(f"❌ Error de configuración: Falta la sección {e} en secrets.toml.")
-        return None
-    except Exception as e:
-        # Esto captura errores de conexión o autenticación de Google
-        st.error(f"❌ Error de autenticación de GDrive: {e}. Revise sus credenciales y permisos de Drive.")
-        return None
 
 def get_pat_file_name(user_area):
     """Genera el nombre de archivo para guardar el avance del PAT."""
-    clean_area = re.sub(r'[^a-zA-Z0-9_]', '_', user_area)
-    return f"avance_pat_{clean_area}" # Usaremos el nombre de la UR como clave
+    # Aseguramos un nombre de archivo seguro
+    clean_area = re.sub(r'[^\w\s-]', '', user_area.replace(' ', '_'))
+    return f"avance_pat_{clean_area}.json"
 
 def save_pat_progress(user_area, pat_data):
-    """REAL: Guarda el avance del PAT en Google Sheets (Hoja 'PAT_Data')."""
-    client = get_gspread_client()
-    if not client:
-        st.session_state['drive_status'] = "⚠️ Persistencia: Deshabilitada o error de conexión."
-        return
-
-    try:
-        # Abre la hoja por la clave definida en secrets.toml y usa la pestaña 'PAT_Data'
-        sheet = client.open_by_key(GOOGLE_SHEET_KEY).worksheet("PAT_Data") 
-        
-        pat_json_data = json.dumps(pat_data, ensure_ascii=False)
-        area_names = sheet.col_values(1)
-        
-        # 1. Buscar si el usuario (UR) ya existe
-        try:
-            row_index = area_names.index(user_area) + 1 
-            # Si existe, actualiza la columna B (Datos JSON)
-            sheet.update_cell(row_index, 2, pat_json_data) 
-            st.session_state['drive_status'] = f"✅ Persistencia: Avance actualizado para {user_area}."
-        except ValueError:
-             # 2. Si no existe, añade una nueva fila
-             sheet.append_row([user_area, pat_json_data], value_input_option='USER_ENTERED')
-             st.session_state['drive_status'] = f"✅ Persistencia: Nuevo PAT guardado para {user_area}."
-        
-    except Exception as e:
-        st.session_state['drive_status'] = f"❌ Error de Persistencia (Guardar): {e}. Asegura que la hoja 'PAT_Data' existe y tiene permisos."
+    """PERSISTENCIA LOCAL: Genera un botón de descarga del archivo JSON."""
+    
+    file_name = get_pat_file_name(user_area)
+    
+    # 1. Convertir datos a JSON y luego a bytes
+    pat_json_data = json.dumps(pat_data, indent=4, ensure_ascii=False)
+    data_to_download = pat_json_data.encode('utf-8')
+    
+    # 2. Renderizar el botón de descarga en el sidebar
+    st.sidebar.markdown("---")
+    st.sidebar.download_button(
+        label="⬇️ Descargar Avance (.json)",
+        data=data_to_download,
+        file_name=file_name,
+        mime='application/json',
+        help="Guarda tu progreso para cargarlo en otra sesión."
+    )
+    
+    # 3. Actualizar estado (simulación de guardado exitoso)
+    st.session_state['drive_status'] = f"✅ Avance listo para descargar: {file_name}"
 
 def load_pat_progress(user_area):
-    """REAL: Carga el avance del PAT desde Google Sheets."""
-    client = get_gspread_client()
-    if not client:
-        st.session_state['drive_status'] = "⚠️ Persistencia: Deshabilitada o error de conexión."
-        return {"problema": None, "proposito": None, "componentes": []}
+    """PERSISTENCIA LOCAL: Muestra el uploader y carga el JSON si se proporciona."""
+    
+    st.sidebar.markdown("---")
+    uploaded_file = st.sidebar.file_uploader(
+        "⬆️ Cargar Avance de PAT (.json)",
+        type=['json'],
+        key="pat_file_uploader",
+        help="Sube el archivo JSON de avance guardado previamente."
+    )
 
-    try:
-        sheet = client.open_by_key(GOOGLE_SHEET_KEY).worksheet("PAT_Data") 
-        
-        area_names = sheet.col_values(1)
-        
-        # Buscar la fila del usuario
+    if uploaded_file is not None:
         try:
-            row_index = area_names.index(user_area) + 1 
-            pat_json = sheet.cell(row_index, 2).value
+            # Leer el archivo subido
+            bytes_data = uploaded_file.getvalue()
+            pat_data = json.loads(bytes_data.decode('utf-8'))
             
-            if pat_json:
-                pat_data = json.loads(pat_json)
-                st.session_state['drive_status'] = f"✅ Persistencia: Avance cargado para {user_area}."
-                return pat_data
-            else:
-                st.session_state['drive_status'] = f"⚠️ Persistencia: Fila encontrada, pero sin datos de PAT para {user_area}."
-                return {"problema": None, "proposito": None, "componentes": []}
-        
-        except ValueError:
-             st.session_state['drive_status'] = f"⚠️ Persistencia: No se encontró la UR '{user_area}' en la hoja 'PAT_Data'. Se iniciará un nuevo PAT."
-             return {"problema": None, "proposito": None, "componentes": []}
-        
-    except Exception as e:
-        st.session_state['drive_status'] = f"❌ Error de Persistencia (Cargar): {e}. Asegura que la hoja 'PAT_Data' existe y tiene permisos."
-        return {"problema": None, "proposito": None, "componentes": []}
+            # Revalidar que el archivo subido no sea vacío
+            if not pat_data or pat_data.get('problema') is None:
+                 st.sidebar.error("❌ El archivo JSON está vacío o es inválido.")
+                 return {"problema": None, "proposito": None, "componentes": []}
+                 
+            st.session_state['drive_status'] = f"✅ Avance '{uploaded_file.name}' cargado exitosamente."
+            return pat_data
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Error al cargar el archivo: {e}")
+            return {"problema": None, "proposito": None, "componentes": []}
+    
+    # Si no hay archivo subido, inicializa un PAT vacío.
+    st.session_state['drive_status'] = "⚠️ Persistencia: Esperando que cargue un avance o inicie un nuevo PAT."
+    return {"problema": None, "proposito": None, "componentes": []}
 
 
 # --------------------------------------------------------------------------
@@ -376,10 +331,13 @@ def chat_view(user_name, user_area):
     
     # --- 1. Inicializar/Cargar estados ---
     if 'pat_data' not in st.session_state:
+        # Al inicio, mostramos el uploader y cargamos el estado
         st.session_state.pat_data = load_pat_progress(user_area)
     
     if 'messages' not in st.session_state:
         st.session_state.messages = []
+    
+    # Determinar la fase actual basado en los datos cargados
     if 'current_phase' not in st.session_state:
         if st.session_state.pat_data.get('proposito'):
             st.session_state.current_phase = 'Componentes_Definicion'
@@ -392,30 +350,36 @@ def chat_view(user_name, user_area):
         # 🌟 CARGA CRÍTICA DEL CONTEXTO (RAG)
         st.session_state.area_context = load_area_context(user_area)
         
-        if st.session_state.current_phase == 'inicio':
-            initial_message = f"""¡Hola, {user_name}! Soy tu Asesor Senior de Progob. 
+        # Generar mensaje de bienvenida solo si estamos iniciando un nuevo flujo
+        if not st.session_state.messages or st.session_state.current_phase == 'inicio':
             
-            **Atribuciones de tu UR ({user_area}):** {st.session_state.area_context['atribuciones']}
+            # Si cargamos un archivo, no mostramos el mensaje de bienvenida completo aquí, sino en la siguiente ejecución
+            if st.session_state.pat_data.get('problema'):
+                 st.session_state.current_phase = 'Propósito_Seleccion' if st.session_state.pat_data.get('proposito') is None else 'Componentes_Definicion'
+                 initial_message = f"¡Bienvenido de nuevo! Hemos cargado tu avance hasta la fase de **{st.session_state.current_phase.replace('_', ' ')}**. Ingresa tu siguiente respuesta para continuar."
+            else:
+                 # Mensaje de inicio de PAT vacío
+                 initial_message = f"""¡Hola, {user_name}! Soy tu Asesor Senior de Progob. 
+                
+                 **Atribuciones de tu UR ({user_area}):** {st.session_state.area_context['atribuciones']}
+                
+                 **Actividades Previas (Referencia):**
+                 {st.session_state.area_context['actividades_previas']}
+                
+                 **Guía Metodológica:** {st.session_state.area_context['guia_metodologica']}
+                
+                 Comencemos con el primer paso de la Metodología de Marco Lógico (MML): **El Diagnóstico**. 
+                
+                 **FASE 1: DIAGNÓSTICO (PROBLEMA CENTRAL)**
+                
+                 Por favor, ingresa el **Problema Central** que tu área busca resolver este año (el déficit o situación negativa principal).
+                 """
+                 st.session_state.current_phase = 'Diagnostico_Problema'
             
-            **Actividades Previas (Referencia):**
-            {st.session_state.area_context['actividades_previas']}
-            
-            **Guía Metodológica:** {st.session_state.area_context['guia_metodologica']}
-            
-            Comencemos con el primer paso de la Metodología de Marco Lógico (MML): **El Diagnóstico**. 
-            
-            **FASE 1: DIAGNÓSTICO (PROBLEMA CENTRAL)**
-            
-            Por favor, ingresa el **Problema Central** que tu área busca resolver este año (el déficit o situación negativa principal).
-            """
             st.session_state.messages.append({"role": "assistant", "content": initial_message})
-            st.session_state.current_phase = 'Diagnostico_Problema'
-        else:
-             st.session_state.messages.append({"role": "assistant", "content": f"¡Bienvenido de nuevo! Hemos cargado tu avance. Tu Propósito actual es: **{st.session_state.pat_data['proposito'] or 'Pendiente'}**. Estamos en la **Fase: {st.session_state.current_phase.replace('_', ' ')}**."})
              
-    st.sidebar.markdown(f"**Estado de Persistencia:** {st.session_state.get('drive_status', 'No verificado.')}")
-    if not PERSISTENCE_ENABLED:
-        st.sidebar.error("⚠️ **Persistencia Deshabilitada** (Faltan librerías o claves en secrets.toml).")
+    # Muestra el estado de la persistencia (descarga)
+    st.sidebar.markdown(f"**Estado de Avance:** {st.session_state.get('drive_status', 'No verificado.')}")
 
 
     # --- 2. Mostrar Historial del Chat ---
@@ -447,6 +411,7 @@ def chat_view(user_name, user_area):
                 
                 st.session_state.pat_data['problema'] = user_prompt
                 st.session_state.current_phase = 'Propósito_Seleccion'
+                # GUARDAR AVANCE
                 save_pat_progress(user_area, st.session_state.pat_data)
 
 
@@ -465,6 +430,7 @@ def chat_view(user_name, user_area):
                 
                 st.session_state.pat_data['proposito'] = user_prompt
                 st.session_state.current_phase = 'Componentes_Definicion'
+                # GUARDAR AVANCE
                 save_pat_progress(user_area, st.session_state.pat_data)
 
             # ----------------------------------------------------------------------
@@ -482,6 +448,7 @@ def chat_view(user_name, user_area):
                  
                  st.session_state.pat_data['componentes'].append(user_prompt)
                  st.session_state.current_phase = 'Fin_MIR'
+                 # GUARDAR AVANCE
                  save_pat_progress(user_area, st.session_state.pat_data)
             
             # 4. Añadir respuesta del asistente al historial y re-ejecutar
@@ -504,11 +471,7 @@ def admin_view(user_name):
     """Interfaz de administración para la gestión de usuarios (Se mantiene por ahora)."""
     st.title(f"Panel de Administrador | {user_name}")
     st.subheader("Gestión de Usuarios y Supervisión de PATs")
-    if not PERSISTENCE_ENABLED:
-        st.warning("El panel de administración se mantiene. La persistencia está deshabilitada.")
-    else:
-        st.info("La persistencia está activa y funcionando.")
-        
+    st.warning("La persistencia de Drive fue deshabilitada. El avance se guarda por descarga JSON.")
     st.markdown("---")
     df_users = load_users()
     if not df_users.empty:
@@ -526,14 +489,6 @@ def main():
     """Función principal para manejar el login y enrutamiento."""
     df_users = load_users()
     
-    # Muestra la advertencia si faltan los requisitos de persistencia
-    if not PERSISTENCE_ENABLED:
-         if gspread is None or ServiceAccountCredentials is None:
-              st.warning("⚠️ **Advertencia:** Persistencia deshabilitada. Asegúrese de haber instalado las librerías `gspread` y `oauth2client`.")
-         elif GOOGLE_SHEET_KEY is None:
-              st.warning("⚠️ **Advertencia:** Persistencia deshabilitada. Falta la clave `spreadsheet_key` en su `secrets.toml`.")
-
-
     if 'authenticated' not in st.session_state:
         st.session_state['authenticated'] = False
 
