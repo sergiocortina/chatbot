@@ -3,5 +3,5 @@ pandas
 openpyxl
 requests
 pypdf
-gspread       
+gspread
 oauth2client
