@@ -5,13 +5,10 @@ import json
 import io
 import requests 
 import re 
-# Importar librerías críticas para Persistencia y RAG
+# Importar librerías críticas para RAG. NO importamos gspread ni oauth2client.
 try:
-    import gspread
-    from oauth2client.service_account import ServiceAccountCredentials
     import pypdf # Librería para leer PDFs
 except ImportError:
-    gspread = None 
     pypdf = None
 
 # --- CONFIGURACIÓN GENERAL ---
@@ -25,10 +22,7 @@ REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACI
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
 
 # CLAVE API: Se leerá de st.secrets, usando la clave local como último fallback
-DEEPSEEK_API_KEY_LOCAL = "sk-5db40618c1c944779bdec1d46588686d" 
-
-# --- CONFIGURACIÓN DE GSPREAD ---
-DRIVE_FOLDER_NAME = "PAT_Avances_Progob" 
+DEEPSEEK_API_KEY_LOCAL = "sk-NUEVA_CLAVE_GENERADA_DEEPSEEK" 
 
 
 # --- DEFINICIÓN DEL PROMPT MAESTRO (PERSONALIDAD DE PROGOB) ---
@@ -171,7 +165,10 @@ def load_area_context(user_area):
             
             if 'area' in df_actividades.columns and 'actividad' in df_actividades.columns:
                 clean_user_area_upper = user_area.strip().replace('.', '').upper()
-                area_keys = [clean_user_area_upper, 'SIPINNA', 'PROTECCION INTEGRAL', 'ADOLESCENTES', 'NIÑOS']
+                
+                area_keys = [clean_user_area_upper]
+                if "SIPINNA" in clean_user_area_upper:
+                     area_keys.append('SIPINNA')
                 
                 filtered_df = df_actividades[
                     df_actividades['area'].astype(str).str.upper().apply(
@@ -184,7 +181,7 @@ def load_area_context(user_area):
                     context["actividades_previas"] = f"Actividades encontradas: ({len(filtered_df)} registros). Estas serán usadas para sugerir Componentes."
                     st.session_state['actividades_content'] = actividades_text
                 else:
-                    context["actividades_previas"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}' en el CSV. El LLM procederá sin esta referencia."
+                    context["actividades_previas"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}' en el CSV. El LLM procederá sin esta referencia. Verifique que el nombre del área en el CSV coincida con una palabra clave clave."
 
         except Exception as e:
             context["actividades_previas"] = f"Error al procesar el archivo de actividades ({ACTIVIDADES_FILE}): {e}"
@@ -200,10 +197,12 @@ def get_llm_response(system_prompt: str, user_query: str):
     Función de conexión a la API, leyendo la clave desde st.secrets e inyectando contexto RAG.
     """
     try:
+        # Se asume que la clave NUEVA ya fue configurada en secrets.toml
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
+        # Fallback si secrets falla o estamos en entorno local sin secrets
         api_key = DEEPSEEK_API_KEY_LOCAL
-        if not api_key:
+        if not api_key or api_key == "sk-NUEVA_CLAVE_GENERADA_DEEPSEEK":
              st.error("🚨 ERROR: La clave 'deepseek_api_key' no es válida o falta en `secrets.toml`.")
              return "❌ Conexión fallida. Por favor, verifica tu clave API."
     
@@ -248,44 +247,20 @@ def get_llm_response(system_prompt: str, user_query: str):
         if data and 'choices' in data and data['choices']:
             return data['choices'][0]['message']['content']
         else:
-            # CORRECCIÓN DE SINTAXIS: Usar cadenas normales o f-string correcto
-            st.warning(f"⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
+            st.warning(f⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
             return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
 
     except requests.exceptions.RequestException as e:
-        # CORRECCIÓN DE SINTAXIS
         st.error(f"❌ Error en la comunicación con la API. Detalle: {e}")
         return f"❌ Error de comunicación. Detalle: {e}"
     except Exception as e:
-        # CORRECCIÓN DE SINTAXIS
         st.error(f"❌ Error interno al procesar la respuesta: {e}")
         return "❌ Error interno. Revisa el código de procesamiento."
 
 
 # --------------------------------------------------------------------------
-# B. FUNCIONES DE PERSISTENCIA (Google Drive/gspread)
+# B. FUNCIONES DE PERSISTENCIA (Google Drive/gspread - SIMULADAS)
 # --------------------------------------------------------------------------
-
-def get_gspread_client():
-    """Conecta con Google Sheets/Drive usando credenciales de Streamlit Secrets."""
-    if gspread is None:
-        st.sidebar.warning("⚠️ Persistencia: Librería 'gspread' no instalada o credenciales incompletas.")
-        return None
-        
-    try:
-        creds_dict = st.secrets["gspread"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope=[
-            'https://spreadsheets.google.com/feeds',
-            'https://www.googleapis.com/auth/drive'
-        ])
-        client = gspread.authorize(creds)
-        return client
-    except KeyError:
-        st.warning("⚠️ La sección 'gspread' no está configurada en secrets.toml. Persistencia deshabilitada.")
-        return None
-    except Exception as e:
-        st.error(f"❌ Error de autenticación de GDrive: {e}. Revise sus credenciales.")
-        return None
 
 def get_pat_file_name(user_area):
     """Genera el nombre de archivo para guardar el avance del PAT."""
@@ -293,45 +268,14 @@ def get_pat_file_name(user_area):
     return f"avance_pat_{clean_area}.json"
 
 def save_pat_progress(user_area, pat_data):
-    """Guarda el avance del PAT como un archivo JSON en Google Drive."""
-    client = get_gspread_client()
-    if not client:
-        return
-
-    # LÓGICA REAL DE ESCRITURA EN DRIVE (SIMULACIÓN DE INTERACCIÓN DE DRIVE API)
-    try:
-        file_name = get_pat_file_name(user_area)
-        content = json.dumps(pat_data, indent=4, ensure_ascii=False)
-        
-        # Simulación de guardado:
-        st.sidebar.success(f"💾 Progreso guardado exitosamente: {file_name}")
-        st.session_state['drive_status'] = f"Avance guardado: {file_name}"
-        
-        # Aquí iría la lógica real de guardado usando google-api-python-client/Drive SDK
-        
-    except Exception as e:
-        st.sidebar.error(f"❌ Error al guardar en Drive: {e}")
-        st.session_state['drive_status'] = f"Error al guardar: {e}"
+    """SIMULACIÓN: Guarda el avance del PAT."""
+    file_name = get_pat_file_name(user_area)
+    st.session_state['drive_status'] = f"SIMULACIÓN: Avance guardado: {file_name}. (Persistencia deshabilitada)"
 
 def load_pat_progress(user_area):
-    """Carga el avance del PAT desde Google Drive."""
-    client = get_gspread_client()
-    if not client:
-        return {"problema": None, "proposito": None, "componentes": []}
-
-    # LÓGICA REAL DE LECTURA EN DRIVE (SIMULACIÓN DE INTERACCIÓN DE DRIVE API)
-    file_name = get_pat_file_name(user_area)
-    
-    try:
-        # Simulación de carga vacía (o no encontrado):
-        st.sidebar.info(f"Cargando avance de {user_area}...")
-        st.session_state['drive_status'] = "No se encontró avance previo. Iniciando nuevo PAT."
-        return {"problema": None, "proposito": None, "componentes": []}
-        
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ No se pudo cargar el avance previo. Error: {e}")
-        st.session_state['drive_status'] = f"Error de carga: {e}"
-        return {"problema": None, "proposito": None, "componentes": []}
+    """SIMULACIÓN: Carga el avance del PAT."""
+    st.session_state['drive_status'] = "SIMULACIÓN: Persistencia deshabilitada. Iniciando nuevo PAT."
+    return {"problema": None, "proposito": None, "componentes": []}
 
 
 # --------------------------------------------------------------------------
@@ -471,7 +415,7 @@ def admin_view(user_name):
     """Interfaz de administración para la gestión de usuarios (Se mantiene por ahora)."""
     st.title(f"Panel de Administrador | {user_name}")
     st.subheader("Gestión de Usuarios y Supervisión de PATs")
-    st.warning("El panel de administración se mantiene. Las funciones de carga de PATs requieren la configuración de Google Drive.")
+    st.warning("El panel de administración se mantiene. La persistencia está deshabilitada.")
     st.markdown("---")
     df_users = load_users()
     if not df_users.empty:
