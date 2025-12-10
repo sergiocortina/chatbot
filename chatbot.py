@@ -10,8 +10,6 @@ try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     import pypdf # Librería para leer PDFs
-    # Nota: La librería google-api-python-client sería ideal para manejar archivos JSON en Drive,
-    # pero usaremos gspread/simulación para evitar más dependencias iniciales.
 except ImportError:
     gspread = None 
     pypdf = None
@@ -80,13 +78,13 @@ def load_users():
                     df = pd.read_csv(found_file, sep=';', encoding='latin1')
                  
         except Exception as e:
-            st.error(f"Error al procesar el archivo '{found_file}'. Revise el formato. Error: {e}")
+            st.error(f"❌ Error al procesar el archivo '{found_file}'. Revise el formato. Error: {e}")
             return pd.DataFrame()
 
         try:
             df.columns = df.columns.astype(str).str.strip().str.lower()
         except Exception as e:
-            st.error(f"Error al normalizar nombres de columna: {e}. Asegúrese de que el archivo tenga encabezados válidos.")
+            st.error(f"❌ Error al normalizar nombres de columna: {e}. Asegúrese de que el archivo tenga encabezados válidos.")
             return pd.DataFrame()
         
         return df
@@ -250,13 +248,16 @@ def get_llm_response(system_prompt: str, user_query: str):
         if data and 'choices' in data and data['choices']:
             return data['choices'][0]['message']['content']
         else:
-            st.warning(f⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
+            # CORRECCIÓN DE SINTAXIS: Usar cadenas normales o f-string correcto
+            st.warning(f"⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
             return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
 
     except requests.exceptions.RequestException as e:
+        # CORRECCIÓN DE SINTAXIS
         st.error(f"❌ Error en la comunicación con la API. Detalle: {e}")
         return f"❌ Error de comunicación. Detalle: {e}"
     except Exception as e:
+        # CORRECCIÓN DE SINTAXIS
         st.error(f"❌ Error interno al procesar la respuesta: {e}")
         return "❌ Error interno. Revisa el código de procesamiento."
 
@@ -299,7 +300,6 @@ def save_pat_progress(user_area, pat_data):
 
     # LÓGICA REAL DE ESCRITURA EN DRIVE (SIMULACIÓN DE INTERACCIÓN DE DRIVE API)
     try:
-        # Aquí iría la lógica para buscar/crear un archivo en Drive y escribir el JSON
         file_name = get_pat_file_name(user_area)
         content = json.dumps(pat_data, indent=4, ensure_ascii=False)
         
@@ -307,7 +307,7 @@ def save_pat_progress(user_area, pat_data):
         st.sidebar.success(f"💾 Progreso guardado exitosamente: {file_name}")
         st.session_state['drive_status'] = f"Avance guardado: {file_name}"
         
-        # Si tuvieras el SDK de Drive instalado, la llamada iría aquí.
+        # Aquí iría la lógica real de guardado usando google-api-python-client/Drive SDK
         
     except Exception as e:
         st.sidebar.error(f"❌ Error al guardar en Drive: {e}")
@@ -323,15 +323,12 @@ def load_pat_progress(user_area):
     file_name = get_pat_file_name(user_area)
     
     try:
-        # Aquí iría la lógica para buscar el archivo en Drive y leer el JSON
-        
         # Simulación de carga vacía (o no encontrado):
         st.sidebar.info(f"Cargando avance de {user_area}...")
         st.session_state['drive_status'] = "No se encontró avance previo. Iniciando nuevo PAT."
         return {"problema": None, "proposito": None, "componentes": []}
         
     except Exception as e:
-        # Si el archivo existe pero hay un error de lectura o parseo
         st.sidebar.warning(f"⚠️ No se pudo cargar el avance previo. Error: {e}")
         st.session_state['drive_status'] = f"Error de carga: {e}"
         return {"problema": None, "proposito": None, "componentes": []}
