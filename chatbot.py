@@ -5,12 +5,14 @@ import json
 import io
 import requests 
 import re 
-# Importar gspread y credenciales (Asegúrate de que 'gspread' esté en requirements.txt)
+# Importar librerías críticas para Persistencia y RAG
 try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
+    import pypdf # Librería para leer PDFs
 except ImportError:
     gspread = None 
+    pypdf = None
 
 # --- CONFIGURACIÓN GENERAL ---
 st.set_page_config(page_title="Asesor Progob PBR/MML Veracruz", layout="wide")
@@ -18,11 +20,12 @@ st.set_page_config(page_title="Asesor Progob PBR/MML Veracruz", layout="wide")
 # Nombres de archivo y directorios
 USERS_FILE_NAME = "users.xlsx" 
 DOCS_DIR = "docs"
-# 🌟 CORRECCIÓN CRÍTICA DE NOMBRES DE ARCHIVO
-ACTIVIDADES_FILE = os.path.join(DOCS_DIR, "Actividades por area.csv") # <-- Nombre corregido
-REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACION-PUBLICA-DEL-MUNICIPIO-DE-VERACRUZ.pdf") # <-- Nombre agregado para referencia RAG
+# 🌟 NOMBRES DE ARCHIVOS EN REPOSITORIO DE GITHUB
+ACTIVIDADES_FILE = os.path.join(DOCS_DIR, "Actividades por area.csv") 
+REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACION-PUBLICA-DEL-MUNICIPIO-DE-VERACRUZ.pdf") 
+GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
 
-# CLAVE API: Se leerá de st.secrets, pero la colocamos aquí para referencia/pruebas locales
+# CLAVE API: Se leerá de st.secrets, usando la clave local como último fallback
 DEEPSEEK_API_KEY_LOCAL = "sk-5db40618c1c944779bdec1d46588686d" 
 
 # --- CONFIGURACIÓN DE GSPREAD ---
@@ -116,43 +119,80 @@ def authenticate(username, password, df_users):
     return None, None, None
 
 
+def extract_text_from_pdf(pdf_path):
+    """Extrae texto de un archivo PDF si pypdf está instalado."""
+    if not pypdf:
+        return "ERROR: Librería 'pypdf' no instalada."
+    if not os.path.exists(pdf_path):
+        return f"ERROR: Archivo no encontrado en {pdf_path}"
+        
+    try:
+        reader = pypdf.PdfReader(pdf_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        # Limitamos el texto para no saturar el prompt del LLM
+        return text[:15000] 
+    except Exception as e:
+        return f"ERROR al leer el PDF: {e}"
+
+
 def load_area_context(user_area):
     """
-    Carga el contexto específico del área del usuario.
-    CORRECCIÓN: Se ajusta la lógica para buscar el nombre de archivo exacto en docs/
+    Carga el contexto específico del área del usuario, leyendo PDF y CSV (RAG).
     """
-    context = {"atribuciones": "Lógica RAG pendiente.", "actividades_previas": "No disponibles."}
+    context = {"atribuciones": "Contexto no cargado.", "actividades_previas": "No disponibles.", "guia_metodologica": "Guía no cargada."}
 
-    # 1. ATRIBUCIONES (Reglamento Interior - Lógica RAG Pendiente)
-    # Mostramos un mensaje claro sobre la dependencia RAG.
-    atribuciones_status = "El archivo del Reglamento Interior fue encontrado." if os.path.exists(REGLAMENTO_FILE) else "El archivo del Reglamento Interior NO fue encontrado."
-    context["atribuciones"] = f"La **Unidad Responsable ({user_area})** está siendo contextualizada con el Reglamento Interior. (Lógica RAG de PDFs pendiente de implementar. Estado del archivo: {atribuciones_status})"
+    # --- 1. CARGA DE ATRIBUCIONES (REGLAMENTO PDF) ---
+    reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
+    
+    if "ERROR" in reglamento_text:
+        context["atribuciones"] = f"ADVERTENCIA (Reglamento): {reglamento_text}"
+    else:
+        context["atribuciones"] = f"El Reglamento Interior ha sido cargado ({len(reglamento_text)} caracteres). El Asesor utilizará este texto para validar las facultades de {user_area}."
+        st.session_state['reglamento_content'] = reglamento_text 
+        
+    # --- 2. CARGA DE GUÍA METODOLÓGICA (PDF) ---
+    guia_text = extract_text_from_pdf(GUIDE_FILE)
+    if "ERROR" in guia_text:
+        context["guia_metodologica"] = f"ADVERTENCIA (Guía): {guia_text}"
+    else:
+        context["guia_metodologica"] = f"La Guía Metodológica ha sido cargada ({len(guia_text)} caracteres). El Asesor debe usar esta guía para formular sus preguntas y validaciones metodológicas."
+        st.session_state['guia_content'] = guia_text 
 
-    # 2. Intentar cargar actividades previas desde el CSV de actividades
+    # --- 3. CARGA DE ACTIVIDADES PREVIAS (CSV) ---
     if os.path.exists(ACTIVIDADES_FILE):
         try:
             # Leer con codificación robusta
             try:
                 df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
             except UnicodeDecodeError:
-                df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='latin1')
+                # Intentamos con separador punto y coma y latin1 (común en archivos CSV de Excel)
+                df_actividades = pd.read_csv(ACTIVIDADES_FILE, sep=';', encoding='latin1') 
                 
             df_actividades.columns = df_actividades.columns.str.lower()
             
-            # Buscamos el área
             if 'area' in df_actividades.columns and 'actividad' in df_actividades.columns:
-                clean_user_area = user_area.strip().replace('.', '').upper()
+                # ESTRATEGIA DE BÚSQUEDA MEJORADA: Buscamos por palabras clave relevantes
+                # Eliminamos el punto final del área y convertimos a mayúsculas
+                clean_user_area_upper = user_area.strip().replace('.', '').upper()
                 
-                area_actividades = df_actividades[
-                    df_actividades['area'].astype(str).str.upper().str.contains(clean_user_area, case=False, na=False)
+                # Lista de palabras clave que podrían identificar el área en el CSV (ej: "SIPINNA" es más corto)
+                area_keys = [clean_user_area_upper, 'SIPINNA', 'PROTECCION INTEGRAL', 'ADOLESCENTES', 'NIÑOS']
+                
+                filtered_df = df_actividades[
+                    df_actividades['area'].astype(str).str.upper().apply(
+                        lambda x: any(key in x for key in area_keys)
+                    )
                 ]
                 
-                if not area_actividades.empty:
-                    actividades_list = area_actividades['actividad'].tolist()
-                    context["actividades_previas"] = "\n* " + "\n* ".join(actividades_list)
-                    context["actividades_previas"] += "\n(Estas actividades son importantes para definir los Componentes/Productos)."
+                if not filtered_df.empty:
+                    # Guardamos el texto completo para inyectar en el prompt
+                    actividades_text = "\n* " + "\n* ".join(filtered_df['actividad'].tolist())
+                    context["actividades_previas"] = f"Actividades encontradas: ({len(filtered_df)} registros). Estas serán usadas para sugerir Componentes."
+                    st.session_state['actividades_content'] = actividades_text
                 else:
-                    context["actividades_previas"] = f"No se encontraron actividades previas para el área '{user_area}' en el archivo de referencia. Verifique el nombre del área en el CSV."
+                    context["actividades_previas"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}' en el CSV. El LLM procederá sin esta referencia."
 
         except Exception as e:
             context["actividades_previas"] = f"Error al procesar el archivo de actividades ({ACTIVIDADES_FILE}): {e}"
@@ -165,16 +205,29 @@ def load_area_context(user_area):
 
 def get_llm_response(system_prompt: str, user_query: str):
     """
-    Función de conexión a la API, leyendo la clave desde st.secrets.
+    Función de conexión a la API, leyendo la clave desde st.secrets e inyectando contexto RAG.
     """
     try:
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
-        # Fallback a clave local si secrets no existe o no tiene la clave
         api_key = DEEPSEEK_API_KEY_LOCAL
-        if not api_key or api_key == "sk-5db40618c1c944779bdec1d46588686d":
+        if not api_key:
              st.error("🚨 ERROR: La clave 'deepseek_api_key' no es válida o falta en `secrets.toml`.")
              return "❌ Conexión fallida. Por favor, verifica tu clave API."
+    
+    # --- INYECCIÓN RAG CRÍTICA ---
+    rag_context = ""
+    if 'reglamento_content' in st.session_state:
+        rag_context += f"\n\n--- CONTEXTO RAG (REGLAMENTO INTERIOR) ---\n{st.session_state['reglamento_content']}"
+    if 'guia_content' in st.session_state:
+        rag_context += f"\n\n--- CONTEXTO RAG (GUÍA METODOLÓGICA) ---\n{st.session_state['guia_content']}"
+    if 'actividades_content' in st.session_state:
+        rag_context += f"\n\n--- CONTEXTO RAG (ACTIVIDADES PREVIAS DEL ÁREA) ---\n{st.session_state['actividades_content']}"
+
+    # Combinamos el prompt del sistema con el contexto RAG
+    final_system_prompt = system_prompt.replace("{user_area_context}", st.session_state['area_context']['atribuciones'])
+    final_system_prompt += rag_context
+    # -----------------------------
     
     API_URL = "https://api.deepseek.com/v1/chat/completions"
     headers = {
@@ -183,20 +236,20 @@ def get_llm_response(system_prompt: str, user_query: str):
     }
     
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": final_system_prompt},
         {"role": "user", "content": user_query}
     ]
     
     payload = {
         "model": "deepseek-chat", 
         "messages": messages,
-        "temperature": 0.7,      
-        "max_tokens": 2000
+        "temperature": 0.3, 
+        "max_tokens": 4000 # Aumentamos para asegurar que la respuesta y el contexto quepan
     }
     
     try:
         with st.spinner("🔍 Consultando la base de conocimiento Progob..."):
-            response = requests.post(API_URL, headers=headers, json=payload, timeout=45)
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=60) # Más timeout por el RAG
             response.raise_for_status()
         
         data = response.json()
@@ -299,6 +352,7 @@ def chat_view(user_name, user_area):
             st.session_state.current_phase = 'inicio'
 
     if 'area_context' not in st.session_state:
+        # 🌟 CARGA CRÍTICA DEL CONTEXTO (RAG)
         st.session_state.area_context = load_area_context(user_area)
         
         if st.session_state.current_phase == 'inicio':
@@ -308,6 +362,8 @@ def chat_view(user_name, user_area):
             
             **Actividades Previas (Referencia):**
             {st.session_state.area_context['actividades_previas']}
+            
+            **Guía Metodológica:** {st.session_state.area_context['guia_metodologica']}
             
             Comencemos con el primer paso de la Metodología de Marco Lógico (MML): **El Diagnóstico**. 
             
@@ -346,7 +402,7 @@ def chat_view(user_name, user_area):
                 **FASE ACTUAL: Diagnóstico.** {system_context_rag}
                 El usuario propone el siguiente Problema Central: "{user_prompt}".
                 
-                Como Enlace Senior de Progob: 1. Evalúa si el problema es un déficit y está dentro de las atribuciones. 2. Genera 3 Causas Directas y 3 Efectos (Árbol de Problemas) y preséntalos como una tabla o lista. 3. Propón tres opciones de Propósito (Objetivo General) que se deriven de este problema (Opciones A, B, C). 4. Instruye al usuario a seleccionar una opción. 
+                Como Enlace Senior de Progob: 1. Usando el Reglamento Interior, **valida** si el problema está dentro de las atribuciones de la UR. 2. Usando la Guía Metodológica, **genera** 3 Causas Directas y 3 Efectos (Árbol de Problemas) y preséntalos como una tabla. 3. Usando las Actividades Previas y la validación anterior, **propón** tres opciones de Propósito (Objetivo General) que se deriven de este problema (Opciones A, B, C). 4. Instruye al usuario a seleccionar una opción. 
                 """
                 response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
                 
@@ -364,7 +420,7 @@ def chat_view(user_name, user_area):
                 El problema validado es: "{st.session_state.pat_data['problema']}".
                 El usuario seleccionó/propuso: "{user_prompt}" como su Propósito/Objetivo General.
                 
-                Como Enlace Senior de Progob: 1. Valida el Propósito seleccionado metodológicamente. 2. Sugiere un borrador de Indicador del Propósito (RMAE-T) y el Medio de Verificación. 3. Guía al usuario a la siguiente fase: **Componentes**. Pídele que liste los 2 o 3 productos/servicios principales que su área debe entregar para alcanzar ese Propósito.
+                Como Enlace Senior de Progob: 1. Usando la Guía Metodológica, **valida** el Propósito seleccionado metodológicamente (Lógica Vertical). 2. Sugiere un borrador de Indicador del Propósito (RMAE-T) y el Medio de Verificación. 3. Guía al usuario a la siguiente fase: **Componentes**. Pídele que liste los 2 o 3 productos/servicios principales que su área debe entregar para alcanzar ese Propósito, basados en las Actividades Previas.
                 """
                 response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
                 
@@ -381,7 +437,7 @@ def chat_view(user_name, user_area):
                 Propósito: "{st.session_state.pat_data['proposito']}".
                 El usuario propone Componentes/Productos: "{user_prompt}".
                 
-                Como Enlace Senior de Progob: 1. Separa la lista de componentes del usuario. 2. Evalúa su coherencia y suficiencia respecto al Propósito. 3. Genera un borrador de Indicador (RMAE-T) y 3 Actividades clave para el primer Componente. 4. Instruye al usuario sobre cómo pasar estas Actividades al Calendario de Trabajo Anual y finalizar la MIR. 
+                Como Enlace Senior de Progob: 1. Usando las Actividades Previas, **separa** la lista de componentes del usuario. 2. **Evalúa** su coherencia y suficiencia respecto al Propósito (Lógica Horizontal/Vertical). 3. Genera un borrador de Indicador (RMAE-T) y 3 Actividades clave para el primer Componente. 4. Instruye al usuario sobre cómo pasar estas Actividades al Calendario de Trabajo Anual y finalizar la MIR. 
                 """
                  response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
                  
