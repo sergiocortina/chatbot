@@ -63,7 +63,12 @@ def load_users():
             
             # Si tiene una sola columna, reintentar con punto y coma (solo para CSV)
             if len(df.columns) == 1 and found_file.endswith('.csv'):
-                df = pd.read_csv(found_file, sep=';')
+                # Usar encoding='latin1' para manejar caracteres especiales si es necesario
+                try:
+                    df = pd.read_csv(found_file, sep=';', encoding='utf-8')
+                except:
+                    df = pd.read_csv(found_file, sep=';', encoding='latin1')
+
                  
         except Exception as e:
             # Error de formato/lectura de Pandas
@@ -71,7 +76,12 @@ def load_users():
             return pd.DataFrame()
 
         # *** CORRECCIÓN CRÍTICA: NORMALIZAR NOMBRES DE COLUMNAS ***
-        df.columns = df.columns.str.strip().str.lower()
+        # Se asegura que los nombres de las columnas sean strings antes de usar .str
+        try:
+            df.columns = df.columns.astype(str).str.strip().str.lower()
+        except Exception as e:
+            st.error(f"Error al normalizar nombres de columna: {e}. Asegúrese de que el archivo tenga encabezados válidos.")
+            return pd.DataFrame()
         # **********************************************************
         
         return df
@@ -90,10 +100,11 @@ def authenticate(username, password, df_users):
     user = df_users[(df_users['username'] == clean_username) & (df_users['password'] == password)]
     
     if not user.empty:
-        role = user['role'].iloc[0] if 'role' in user.columns else 'enlace' 
-        name = user['nombre'].iloc[0] if 'nombre' in user.columns else 'Usuario'
-        area = user['area'].iloc[0] if 'area' in user.columns else 'Sin Área'
-        return str(role).strip().lower(), str(name).strip(), str(area).strip()
+        # Usar .astype(str) en caso de que las columnas tengan tipos mixtos
+        role = str(user['role'].iloc[0]).strip().lower() if 'role' in user.columns else 'enlace' 
+        name = str(user['nombre'].iloc[0]).strip() if 'nombre' in user.columns else 'Usuario'
+        area = str(user['area'].iloc[0]).strip() if 'area' in user.columns else 'Sin Área'
+        return role, name, area
     return None, None, None
 
 def get_deepseek_response(system_prompt: str, user_query: str):
@@ -103,9 +114,9 @@ def get_deepseek_response(system_prompt: str, user_query: str):
     global DEEPSEEK_API_KEY
     
     # 1. Verificar la clave API
-    if DEEPSEEK_API_KEY == "TU_CLAVE_API_DEEPSEEK_AQUI" or not DEEPSEEK_API_KEY:
+    if DEEPSEEK_API_KEY == "sk-266e71790bed476bb2c60a322090bf03" or not DEEPSEEK_API_KEY:
         # Se muestra un mensaje de error y se devuelve una respuesta de simulación forzada.
-        st.error("🚨 ERROR: Debes ingresar tu clave API de Deepseek en la variable DEEPSEEK_API_KEY.")
+        st.error("🚨 ERROR: Debes ingresar tu clave API de Deepseek en la variable DEEPSEEK_API_KEY o cambiar la clave por defecto.")
         return "❌ Conexión fallida. Por favor, configura tu clave API de Deepseek para continuar y deshabilitar el modo simulación."
     
     # 2. Configuración de la API (compatible con OpenAI)
@@ -130,7 +141,8 @@ def get_deepseek_response(system_prompt: str, user_query: str):
     }
     
     try:
-        st.info("💻 Conectando a Deepseek...")
+        # Ocultar el info temporalmente, ya que requests es síncrono
+        # st.info("💻 Conectando a Deepseek...")
         response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
         response.raise_for_status() # Lanza una excepción para errores 4xx/5xx
         
@@ -141,7 +153,7 @@ def get_deepseek_response(system_prompt: str, user_query: str):
             # Se devuelve el contenido del mensaje del asistente
             return data['choices'][0]['message']['content']
         else:
-            st.warning(f"⚠️ Respuesta vacía o inesperada de Deepseek. Datos: {data}")
+            st.warning(f"⚠️ Respuesta vacía o inesperada de Deepseek. Código: {response.status_code}")
             return f"⚠️ Respuesta vacía de Deepseek. Código de estado: {response.status_code}"
 
     except requests.exceptions.HTTPError as e:
@@ -194,29 +206,57 @@ def enlace_view(user_name, user_area):
         
         if st.button("Enviar a Deepseek (Evaluar Problema)"):
             if problema_propuesto:
-                query_deepseek = f"Mi problema central es: {problema_propuesto}. Ahora, como experto en MML, define 3 Causas Directas y 3 Efectos de este problema, y preséntalos en formato de lista para el Árbol de Problemas."
+                query_deepseek = f"Mi problema central es: {problema_propuesto}. Ahora, como experto en MML, define 3 Causas Directas y 3 Efectos de este problema, y preséntalos en formato de lista para el Árbol de Problemas. Guíame para transformarlo en Árbol de Objetivos."
                 response = get_deepseek_response(SYSTEM_PROMPT, query_deepseek) 
                 
                 st.session_state['pat_en_curso']['problema'] = problema_propuesto
                 st.session_state['deepseek_response'] = response
+                st.session_state['pat_en_curso']['fase'] = 'Propósito_Alineacion' # Mover a la siguiente fase
                 st.rerun()
             else:
                 st.warning("Por favor, ingresa el problema central.")
     
     elif fase == 'Propósito_Alineacion':
         st.subheader("Fase 2: Propósito y Alineación (Checkpoint)")
+        
+        # Si ya se evaluó un problema, mostrarlo
+        if st.session_state['pat_en_curso']['problema']:
+             st.info(f"Problema Central Identificado: **{st.session_state['pat_en_curso']['problema']}**")
+             st.markdown("---")
+
         proposito_propuesto = st.text_area("Ingresa el Propósito de tu intervención (Objetivo General):", height=50, key="input_proposito")
         
         if st.button("Validar Propósito y Continuar"):
             if proposito_propuesto:
-                query_deepseek = f"Quiero definir el Propósito de mi intervención: {proposito_propuesto}. Por favor, evalúa su coherencia con la Lógica Vertical y sugiere un borrador de Indicador del Propósito (RMAE-T) y un resumen de las Columnas de la MIR (Medios de Verificación y Supuestos) para esta etapa."
+                query_deepseek = f"Quiero definir el Propósito de mi intervención: {proposito_propuesto}. Por favor, evalúa su coherencia con la Lógica Vertical. Luego, sugiere un borrador de Indicador del Propósito (asegurando criterios RMAE-T) y un resumen de las Columnas de la MIR (Medios de Verificación y Supuestos) para esta etapa. Finalmente, indícame el siguiente paso: la definición de Componentes."
                 response = get_deepseek_response(SYSTEM_PROMPT, query_deepseek) 
                 
                 st.session_state['pat_en_curso']['proposito'] = proposito_propuesto
                 st.session_state['deepseek_response'] = response
+                st.session_state['pat_en_curso']['fase'] = 'Componentes' # Mover a la siguiente fase
                 st.rerun()
             else:
                 st.warning("Por favor, ingresa el Propósito.")
+    
+    elif fase == 'Componentes':
+        st.subheader("Fase 3: Componentes (Resultados Directos)")
+        st.info(f"Propósito en curso: **{st.session_state['pat_en_curso']['proposito']}**")
+        
+        # Aquí se podría implementar una entrada para múltiples componentes o una sola
+        componente_propuesto = st.text_area("Ingresa el Componente 1 (el bien/servicio que entregarás):", height=50, key="input_componente")
+        
+        if st.button("Evaluar Componente y Sugerir Actividades"):
+            if componente_propuesto:
+                # Agregamos el componente para el estado de sesión (simplificado)
+                st.session_state['pat_en_curso']['componentes'].append(componente_propuesto)
+                
+                query_deepseek = f"Mi Propósito es: {st.session_state['pat_en_curso']['proposito']}. El Componente propuesto es: {componente_propuesto}. Evalúa la coherencia entre ambos. Luego, sugiere: 1) Un borrador de Indicador para este Componente (RMAE-T) y 2) Una lista de 3 a 5 Actividades para producir este Componente."
+                response = get_deepseek_response(SYSTEM_PROMPT, query_deepseek) 
+                
+                st.session_state['deepseek_response'] = response
+                st.rerun()
+            else:
+                st.warning("Por favor, ingresa el Componente.")
 
     # Mostrar la respuesta del asesor (se mantiene visible después de cada acción)
     if 'deepseek_response' in st.session_state and st.session_state['deepseek_response']:
@@ -261,18 +301,26 @@ def admin_view(user_name):
             try:
                 # Usar pandas para leer el archivo subido
                 if uploaded_file.name.endswith('.csv'):
-                    new_df = pd.read_csv(uploaded_file)
+                    # Intentar leer con distintas separaciones
+                    try:
+                         new_df = pd.read_csv(uploaded_file, encoding='utf-8')
+                    except:
+                         uploaded_file.seek(0) # Resetear puntero
+                         new_df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8')
                 else:
                     new_df = pd.read_excel(uploaded_file, engine='openpyxl')
                 
                 # Normalizar columnas del nuevo archivo ANTES de validar
-                new_df.columns = new_df.columns.str.strip().str.lower()
+                new_df.columns = new_df.columns.astype(str).str.strip().str.lower()
 
                 # Validar columnas mínimas
                 required_cols = ['username', 'password', 'role']
+                # También buscar 'nombre' y 'area'
+                
                 if all(col in new_df.columns for col in required_cols):
                     # Guardar el archivo localmente 
-                    new_df.to_csv(USERS_FILE_NAME, index=False)
+                    # Nota: Guardarlo como CSV simplifica la recarga
+                    new_df.to_csv(USERS_FILE_NAME, index=False, encoding='utf-8')
                     st.success(f"¡Listado de usuarios actualizado! Se cargaron **{len(new_df)}** registros.")
                     st.balloons()
                     st.rerun()
@@ -289,7 +337,9 @@ def admin_view(user_name):
     # Se muestra un resumen de usuarios para referencia
     if not df_users.empty:
         st.markdown("**Vista Previa de Usuarios**")
-        st.dataframe(df_users[['nombre', 'area', 'role', 'username']].sort_values('role', ascending=False), height=200)
+        # Asegurarse de que las columnas existan antes de mostrarlas
+        cols_to_show = [col for col in ['nombre', 'area', 'role', 'username'] if col in df_users.columns]
+        st.dataframe(df_users[cols_to_show].sort_values('role', ascending=False), height=200)
 
 # --------------------------------------------------------------------------
 # D. FUNCIÓN PRINCIPAL DE LA APP (Login)
@@ -332,6 +382,11 @@ def main():
                     st.rerun() 
                 else:
                     st.sidebar.error("Usuario o contraseña incorrectos. Verifique sus credenciales.")
+        
+        # Mensaje de ayuda inicial si no hay usuarios
+        if df_users.empty:
+            st.warning("⚠️ **ATENCIÓN:** El listado de usuarios no ha sido cargado o el archivo está dañado. Por favor, asegúrese de que exista un archivo como `users.csv` o `users.xlsx` en la misma carpeta.")
+
 
 if __name__ == "__main__":
     main()
