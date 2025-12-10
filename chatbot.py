@@ -9,7 +9,7 @@ import requests # <-- IMPORTANTE: Necesario para la conexión a la API
 st.set_page_config(page_title="Asesor PbR/MML Veracruz", layout="wide")
 
 # Nombres de archivo que buscaremos 
-USERS_FILE_NAME = "users.xlsx - users.csv"
+USERS_FILE_NAME = "users.xlsx"
 
 # Clave API de Deepseek (¡REEMPLAZA ESTA CADENA CON TU CLAVE REAL!)
 DEEPSEEK_API_KEY = "sk-266e71790bed476bb2c60a322090bf03" 
