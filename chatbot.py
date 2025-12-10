@@ -315,7 +315,10 @@ def get_pat_file_name(user_area):
     return f"avance_pat_{clean_area}.json"
 
 def save_pat_progress(user_area, pat_data):
-    """PERSISTENCIA LOCAL: Genera un botón de descarga del archivo JSON."""
+    """
+    PERSISTENCIA LOCAL: Genera el botón de descarga del archivo JSON. 
+    Esta función solo se encarga de dibujar el botón y actualizar el estado.
+    """
     
     file_name = get_pat_file_name(user_area)
     
@@ -324,7 +327,7 @@ def save_pat_progress(user_area, pat_data):
     data_to_download = pat_json_data.encode('utf-8')
     
     # 2. Renderizar el botón de descarga en el sidebar
-    st.sidebar.markdown("---")
+    # st.sidebar.markdown("---") # Se mueve esta línea a chat_view para mejor control visual
     st.sidebar.download_button(
         label="⬇️ Descargar Avance (.json)",
         data=data_to_download,
@@ -599,7 +602,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         """
         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
     
-    # 2. Guardar avance después de cada paso lógico
+    # 2. Guardar avance después de cada paso lógico y actualizar el estado de descarga
     save_pat_progress(user_area, st.session_state.pat_data)
     
     return response_content
@@ -677,6 +680,17 @@ def chat_view(user_name, user_area):
                  st.session_state.current_phase = 'Diagnostico_Problema_Definicion'
             
             st.session_state.messages.append({"role": "assistant", "content": initial_message})
+    
+    # -----------------------------------------------------------------
+    # FIX: ASEGURAR QUE EL BOTÓN DE DESCARGA SE RENDERICE AL CARGAR LA PÁGINA SI HAY PROGRESO
+    # -----------------------------------------------------------------
+    if st.session_state.pat_data.get('problema') is not None or st.session_state.pat_data.get('proposito') is not None:
+         # Dibujamos una línea separadora antes del botón de descarga para mejor visualización
+         st.sidebar.markdown("---")
+         # Volvemos a llamar a save_pat_progress para renderizar el botón en el sidebar.
+         # La data ya está cargada en pat_data.
+         save_pat_progress(user_area, st.session_state.pat_data)
+    # -----------------------------------------------------------------
              
     # Muestra el estado de la persistencia (descarga)
     st.sidebar.markdown(f"**Estado de Avance:** {st.session_state.get('drive_status', 'No verificado.')}")
