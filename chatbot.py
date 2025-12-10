@@ -9,7 +9,8 @@ import requests # <-- IMPORTANTE: Necesario para la conexión a la API
 st.set_page_config(page_title="Asesor PbR/MML Veracruz", layout="wide")
 
 # Nombres de archivo que buscaremos 
-USERS_FILE_NAME = "users.xlsx"
+# CORRECCIÓN: Simplificamos el nombre a la versión más común y en minúsculas.
+USERS_FILE_NAME = "users.xlsx" 
 
 # Clave API de Deepseek (¡REEMPLAZA ESTA CADENA CON TU CLAVE REAL!)
 DEEPSEEK_API_KEY = "sk-266e71790bed476bb2c60a322090bf03" 
@@ -18,7 +19,7 @@ DEEPSEEK_API_KEY = "sk-266e71790bed476bb2c60a322090bf03"
 
 SYSTEM_PROMPT = """
 # ROL DE ASESOR METODOLÓGICO PBR/MML
-**ROL:** Eres el **Asesor Metodológico PBR/MML del H. Ayuntamiento de Veracruz 2022-2025**. Eres un experto en la **Gestión para Resultados (GpR)**, **Metodología de Marco Lógico (MML)**, **Indicadores de Desempeño** (Módulo V), **Transversalidad** (Módulo VI) y **Evaluación** (Módulo VIII), conforme al Diplomado de la SHCP y la Guía Técnica Municipal.
+**ROL:** Eres el **Asesor Metodológico PBR/MML del H. Ayuntamiento de Veracruz 2022-2025**. Eres un experto en la **Gestión para Resultados (GpR)**, **Metodología de Marco Lógico (MML)**, **Indicadores de Desempeño** (Módulo V), **Transversalidad** (Módulo VI) y **Evaluación** (Módulo VIII), conforme al Diplomado de la SHCP y la Guía Técnica Municipal. 
 
 **META:** Guiar al Enlace de Unidad Responsable (UR) paso a paso hasta obtener una **Matriz de Indicadores para Resultados (MIR)** coherente y un **Calendario de Actividades** detallado, asegurando la **Lógica Vertical** (Fin -> Propósito -> Componente -> Actividad).
 
@@ -38,37 +39,38 @@ def load_users():
     Carga el listado de usuarios, intentando encontrar el archivo por diferentes nombres 
     y corrige nombres de columnas.
     """
-    # Nombres posibles del archivo que vamos a buscar
+    # Nombres posibles del archivo que vamos a buscar (incluyendo la variable global)
     possible_names = [
         USERS_FILE_NAME,
         "users.csv",              
-        "users.xlsx",             
-        "usuarios.csv",
         "usuarios.xlsx",
+        "usuarios.csv",
     ]
     
     found_file = None
+    # CORRECCIÓN DE ROBUSTEZ: Intentamos encontrar el archivo
     for name in possible_names:
-        if os.path.exists(name):
-            found_file = name
+        if os.path.exists(name.lower()):
+            found_file = name.lower()
             break
+        if os.path.exists(name): # Buscamos el nombre tal cual
+             found_file = name
+             break
 
     if found_file:
         try:
-            # 1. Intentar cargar como CSV (delimitador coma)
-            if found_file.endswith('.xlsx'):
+            # 1. Intentar cargar como CSV o Excel
+            if found_file.endswith(('.xlsx', '.xls')):
                  df = pd.read_excel(found_file, engine='openpyxl')
             else:
-                df = pd.read_csv(found_file)
-            
-            # Si tiene una sola columna, reintentar con punto y coma (solo para CSV)
-            if len(df.columns) == 1 and found_file.endswith('.csv'):
-                # Usar encoding='latin1' para manejar caracteres especiales si es necesario
+                # Intentar leer con distintas separaciones para CSV
                 try:
-                    df = pd.read_csv(found_file, sep=';', encoding='utf-8')
+                    df = pd.read_csv(found_file, encoding='utf-8')
+                    if len(df.columns) == 1: # Si solo hay una columna, reintentar con ';'
+                        df = pd.read_csv(found_file, sep=';', encoding='utf-8')
                 except:
+                    # Último recurso: latin1 y punto y coma
                     df = pd.read_csv(found_file, sep=';', encoding='latin1')
-
                  
         except Exception as e:
             # Error de formato/lectura de Pandas
@@ -76,7 +78,7 @@ def load_users():
             return pd.DataFrame()
 
         # *** CORRECCIÓN CRÍTICA: NORMALIZAR NOMBRES DE COLUMNAS ***
-        # Se asegura que los nombres de las columnas sean strings antes de usar .str
+        # SOLUCIÓN al AttributeError: Se convierte explícitamente a string antes de usar .str
         try:
             df.columns = df.columns.astype(str).str.strip().str.lower()
         except Exception as e:
@@ -100,7 +102,7 @@ def authenticate(username, password, df_users):
     user = df_users[(df_users['username'] == clean_username) & (df_users['password'] == password)]
     
     if not user.empty:
-        # Usar .astype(str) en caso de que las columnas tengan tipos mixtos
+        # Usar str() para asegurar que el tipo de dato sea string
         role = str(user['role'].iloc[0]).strip().lower() if 'role' in user.columns else 'enlace' 
         name = str(user['nombre'].iloc[0]).strip() if 'nombre' in user.columns else 'Usuario'
         area = str(user['area'].iloc[0]).strip() if 'area' in user.columns else 'Sin Área'
@@ -141,10 +143,10 @@ def get_deepseek_response(system_prompt: str, user_query: str):
     }
     
     try:
-        # Ocultar el info temporalmente, ya que requests es síncrono
-        # st.info("💻 Conectando a Deepseek...")
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status() # Lanza una excepción para errores 4xx/5xx
+        # Mostrar un Spinner mientras se conecta
+        with st.spinner("💻 Conectando a Deepseek y generando respuesta..."):
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+            response.raise_for_status() # Lanza una excepción para errores 4xx/5xx
         
         data = response.json()
         
@@ -206,7 +208,7 @@ def enlace_view(user_name, user_area):
         
         if st.button("Enviar a Deepseek (Evaluar Problema)"):
             if problema_propuesto:
-                query_deepseek = f"Mi problema central es: {problema_propuesto}. Ahora, como experto en MML, define 3 Causas Directas y 3 Efectos de este problema, y preséntalos en formato de lista para el Árbol de Problemas. Guíame para transformarlo en Árbol de Objetivos."
+                query_deepseek = f"Mi problema central es: {problema_propuesto}. Ahora, como experto en MML, define 3 Causas Directas y 3 Efectos de este problema, y preséntalos en formato de lista para el Árbol de Problemas. Guíame para transformarlo en Árbol de Objetivos. "
                 response = get_deepseek_response(SYSTEM_PROMPT, query_deepseek) 
                 
                 st.session_state['pat_en_curso']['problema'] = problema_propuesto
@@ -237,7 +239,7 @@ def enlace_view(user_name, user_area):
                 st.rerun()
             else:
                 st.warning("Por favor, ingresa el Propósito.")
-    
+
     elif fase == 'Componentes':
         st.subheader("Fase 3: Componentes (Resultados Directos)")
         st.info(f"Propósito en curso: **{st.session_state['pat_en_curso']['proposito']}**")
@@ -315,13 +317,11 @@ def admin_view(user_name):
 
                 # Validar columnas mínimas
                 required_cols = ['username', 'password', 'role']
-                # También buscar 'nombre' y 'area'
                 
                 if all(col in new_df.columns for col in required_cols):
-                    # Guardar el archivo localmente 
-                    # Nota: Guardarlo como CSV simplifica la recarga
+                    # Guardar el archivo localmente con el nombre USERS_FILE_NAME
                     new_df.to_csv(USERS_FILE_NAME, index=False, encoding='utf-8')
-                    st.success(f"¡Listado de usuarios actualizado! Se cargaron **{len(new_df)}** registros.")
+                    st.success(f"¡Listado de usuarios actualizado! Se cargaron **{len(new_df)}** registros. (Guardado como {USERS_FILE_NAME})")
                     st.balloons()
                     st.rerun()
                 else:
@@ -339,7 +339,8 @@ def admin_view(user_name):
         st.markdown("**Vista Previa de Usuarios**")
         # Asegurarse de que las columnas existan antes de mostrarlas
         cols_to_show = [col for col in ['nombre', 'area', 'role', 'username'] if col in df_users.columns]
-        st.dataframe(df_users[cols_to_show].sort_values('role', ascending=False), height=200)
+        if cols_to_show:
+            st.dataframe(df_users[cols_to_show].sort_values('role', ascending=False), height=200)
 
 # --------------------------------------------------------------------------
 # D. FUNCIÓN PRINCIPAL DE LA APP (Login)
@@ -368,8 +369,8 @@ def main():
         
         if st.sidebar.button("🔐 Ingresar"):
             if df_users.empty:
-                # Mostrar el error si no se pudo cargar el archivo
-                st.sidebar.error("Error: No se pudo cargar el listado de usuarios. Revise el nombre o formato del archivo de usuarios en la carpeta del script.")
+                # El mensaje de error ya se muestra en load_users si hay un problema
+                st.sidebar.error("Error de carga. El listado de usuarios está vacío. Verifique el archivo y su formato.")
             else:
                 role, name, area = authenticate(username, password, df_users)
                 
@@ -383,9 +384,9 @@ def main():
                 else:
                     st.sidebar.error("Usuario o contraseña incorrectos. Verifique sus credenciales.")
         
-        # Mensaje de ayuda inicial si no hay usuarios
+        # Mensaje de ayuda inicial si no hay usuarios (solo visible si df_users está vacío)
         if df_users.empty:
-            st.warning("⚠️ **ATENCIÓN:** El listado de usuarios no ha sido cargado o el archivo está dañado. Por favor, asegúrese de que exista un archivo como `users.csv` o `users.xlsx` en la misma carpeta.")
+            st.warning(f"⚠️ **ATENCIÓN:** El listado de usuarios no ha sido cargado o el archivo está dañado. Por favor, asegúrese de que exista un archivo como `{USERS_FILE_NAME}` o `users.csv` en la misma carpeta del repositorio de GitHub.")
 
 
 if __name__ == "__main__":
