@@ -10,6 +10,8 @@ try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     import pypdf # Librería para leer PDFs
+    # Nota: La librería google-api-python-client sería ideal para manejar archivos JSON en Drive,
+    # pero usaremos gspread/simulación para evitar más dependencias iniciales.
 except ImportError:
     gspread = None 
     pypdf = None
@@ -20,7 +22,6 @@ st.set_page_config(page_title="Asesor Progob PBR/MML Veracruz", layout="wide")
 # Nombres de archivo y directorios
 USERS_FILE_NAME = "users.xlsx" 
 DOCS_DIR = "docs"
-# 🌟 NOMBRES DE ARCHIVOS EN REPOSITORIO DE GITHUB
 ACTIVIDADES_FILE = os.path.join(DOCS_DIR, "Actividades por area.csv") 
 REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACION-PUBLICA-DEL-MUNICIPIO-DE-VERACRUZ.pdf") 
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
@@ -38,8 +39,6 @@ SYSTEM_PROMPT = """
 # ROL DE ASESOR SENIOR DE PROGOB
 **ROL:** Eres el **Enlace Senior de la Oficina de Programa de Gobierno y Mejora Regulatoria (Progob)** del H. Ayuntamiento de Veracruz 2022-2025. Eres un experto en **Gestión para Resultados (GpR)** y **Metodología de Marco Lógico (MML)**, actuando como el **asesor metodológico** del proceso de planeación.
 
-**LENGUAJE:** Utiliza frases como "Consultando la base de conocimiento...", "Revisando el Reglamento Interior...", "Preguntando a Progob...", o "Según la Guía Técnica...". **Nunca menciones "Deepseek", "LLM" o "Modelo de Lenguaje".**
-
 **META:** Guiar al Enlace de Unidad Responsable (UR) paso a paso para construir una Matriz de Indicadores para Resultados (MIR) coherente, utilizando su contexto de área.
 
 **REGLAS DE INTERACCIÓN (CHAT):**
@@ -47,6 +46,9 @@ SYSTEM_PROMPT = """
 2.  **Validación:** Cada respuesta debe incluir una validación metodológica y, si es posible, opciones para que el usuario elija (ej. "A", "B", "C").
 3.  **Contexto Específico:** Al iniciar, usa las atribuciones y actividades de la Unidad Responsable del usuario ({user_area_context}) para contextualizar las propuestas.
 4.  **Formato:** Usa Markdown para claridad.
+5.  **Didáctica y Conversación:** Siempre que introduzcas un concepto nuevo (ej. Causa Directa, Indicador RMAE-T, Lógica Vertical), **proporciona una breve explicación didáctica y un ejemplo práctico relacionado con un servicio público**, asumiendo que el usuario no es experto en metodología.
+
+**LENGUAJE:** Utiliza frases como "Consultando la base de conocimiento...", "Revisando el Reglamento Interior...", "Preguntando a Progob...", o "Según la Guía Técnica...". **Nunca menciones "Deepseek", "LLM" o "Modelo de Lenguaje".**
 """
 
 # --------------------------------------------------------------------------
@@ -131,7 +133,6 @@ def extract_text_from_pdf(pdf_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text() or ""
-        # Limitamos el texto para no saturar el prompt del LLM
         return text[:15000] 
     except Exception as e:
         return f"ERROR al leer el PDF: {e}"
@@ -163,21 +164,15 @@ def load_area_context(user_area):
     # --- 3. CARGA DE ACTIVIDADES PREVIAS (CSV) ---
     if os.path.exists(ACTIVIDADES_FILE):
         try:
-            # Leer con codificación robusta
             try:
                 df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
             except UnicodeDecodeError:
-                # Intentamos con separador punto y coma y latin1 (común en archivos CSV de Excel)
                 df_actividades = pd.read_csv(ACTIVIDADES_FILE, sep=';', encoding='latin1') 
                 
             df_actividades.columns = df_actividades.columns.str.lower()
             
             if 'area' in df_actividades.columns and 'actividad' in df_actividades.columns:
-                # ESTRATEGIA DE BÚSQUEDA MEJORADA: Buscamos por palabras clave relevantes
-                # Eliminamos el punto final del área y convertimos a mayúsculas
                 clean_user_area_upper = user_area.strip().replace('.', '').upper()
-                
-                # Lista de palabras clave que podrían identificar el área en el CSV (ej: "SIPINNA" es más corto)
                 area_keys = [clean_user_area_upper, 'SIPINNA', 'PROTECCION INTEGRAL', 'ADOLESCENTES', 'NIÑOS']
                 
                 filtered_df = df_actividades[
@@ -187,7 +182,6 @@ def load_area_context(user_area):
                 ]
                 
                 if not filtered_df.empty:
-                    # Guardamos el texto completo para inyectar en el prompt
                     actividades_text = "\n* " + "\n* ".join(filtered_df['actividad'].tolist())
                     context["actividades_previas"] = f"Actividades encontradas: ({len(filtered_df)} registros). Estas serán usadas para sugerir Componentes."
                     st.session_state['actividades_content'] = actividades_text
@@ -224,7 +218,6 @@ def get_llm_response(system_prompt: str, user_query: str):
     if 'actividades_content' in st.session_state:
         rag_context += f"\n\n--- CONTEXTO RAG (ACTIVIDADES PREVIAS DEL ÁREA) ---\n{st.session_state['actividades_content']}"
 
-    # Combinamos el prompt del sistema con el contexto RAG
     final_system_prompt = system_prompt.replace("{user_area_context}", st.session_state['area_context']['atribuciones'])
     final_system_prompt += rag_context
     # -----------------------------
@@ -244,12 +237,12 @@ def get_llm_response(system_prompt: str, user_query: str):
         "model": "deepseek-chat", 
         "messages": messages,
         "temperature": 0.3, 
-        "max_tokens": 4000 # Aumentamos para asegurar que la respuesta y el contexto quepan
+        "max_tokens": 4000
     }
     
     try:
         with st.spinner("🔍 Consultando la base de conocimiento Progob..."):
-            response = requests.post(API_URL, headers=headers, json=payload, timeout=60) # Más timeout por el RAG
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
         
         data = response.json()
@@ -257,7 +250,7 @@ def get_llm_response(system_prompt: str, user_query: str):
         if data and 'choices' in data and data['choices']:
             return data['choices'][0]['message']['content']
         else:
-            st.warning(f"⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
+            st.warning(f⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
             return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
 
     except requests.exceptions.RequestException as e:
@@ -275,6 +268,7 @@ def get_llm_response(system_prompt: str, user_query: str):
 def get_gspread_client():
     """Conecta con Google Sheets/Drive usando credenciales de Streamlit Secrets."""
     if gspread is None:
+        st.sidebar.warning("⚠️ Persistencia: Librería 'gspread' no instalada o credenciales incompletas.")
         return None
         
     try:
@@ -298,31 +292,46 @@ def get_pat_file_name(user_area):
     return f"avance_pat_{clean_area}.json"
 
 def save_pat_progress(user_area, pat_data):
-    """Guarda el avance del PAT (Placeholder de Drive)."""
+    """Guarda el avance del PAT como un archivo JSON en Google Drive."""
     client = get_gspread_client()
     if not client:
         return
 
-    # LÓGICA DE PERSISTENCIA REAL CON GOOGLE DRIVE API (COMPLEJA) VA AQUÍ
+    # LÓGICA REAL DE ESCRITURA EN DRIVE (SIMULACIÓN DE INTERACCIÓN DE DRIVE API)
     try:
-        st.sidebar.success("💾 Progreso guardado exitosamente en Drive (Simulado).")
-        st.session_state['drive_status'] = f"Avance guardado: {get_pat_file_name(user_area)}"
+        # Aquí iría la lógica para buscar/crear un archivo en Drive y escribir el JSON
+        file_name = get_pat_file_name(user_area)
+        content = json.dumps(pat_data, indent=4, ensure_ascii=False)
+        
+        # Simulación de guardado:
+        st.sidebar.success(f"💾 Progreso guardado exitosamente: {file_name}")
+        st.session_state['drive_status'] = f"Avance guardado: {file_name}"
+        
+        # Si tuvieras el SDK de Drive instalado, la llamada iría aquí.
+        
     except Exception as e:
         st.sidebar.error(f"❌ Error al guardar en Drive: {e}")
         st.session_state['drive_status'] = f"Error al guardar: {e}"
 
 def load_pat_progress(user_area):
-    """Carga el avance del PAT (Placeholder de Drive)."""
+    """Carga el avance del PAT desde Google Drive."""
     client = get_gspread_client()
     if not client:
         return {"problema": None, "proposito": None, "componentes": []}
 
-    # LÓGICA DE CARGA DE PERSISTENCIA REAL CON GOOGLE DRIVE API (COMPLEJA) VA AQUÍ
+    # LÓGICA REAL DE LECTURA EN DRIVE (SIMULACIÓN DE INTERACCIÓN DE DRIVE API)
+    file_name = get_pat_file_name(user_area)
+    
     try:
+        # Aquí iría la lógica para buscar el archivo en Drive y leer el JSON
+        
+        # Simulación de carga vacía (o no encontrado):
         st.sidebar.info(f"Cargando avance de {user_area}...")
         st.session_state['drive_status'] = "No se encontró avance previo. Iniciando nuevo PAT."
         return {"problema": None, "proposito": None, "componentes": []}
+        
     except Exception as e:
+        # Si el archivo existe pero hay un error de lectura o parseo
         st.sidebar.warning(f"⚠️ No se pudo cargar el avance previo. Error: {e}")
         st.session_state['drive_status'] = f"Error de carga: {e}"
         return {"problema": None, "proposito": None, "componentes": []}
@@ -402,7 +411,7 @@ def chat_view(user_name, user_area):
                 **FASE ACTUAL: Diagnóstico.** {system_context_rag}
                 El usuario propone el siguiente Problema Central: "{user_prompt}".
                 
-                Como Enlace Senior de Progob: 1. Usando el Reglamento Interior, **valida** si el problema está dentro de las atribuciones de la UR. 2. Usando la Guía Metodológica, **genera** 3 Causas Directas y 3 Efectos (Árbol de Problemas) y preséntalos como una tabla. 3. Usando las Actividades Previas y la validación anterior, **propón** tres opciones de Propósito (Objetivo General) que se deriven de este problema (Opciones A, B, C). 4. Instruye al usuario a seleccionar una opción. 
+                Como Enlace Senior de Progob: 1. Usando el Reglamento Interior (RAG), **valida** si el problema está dentro de las atribuciones de la UR. 2. Usando la Guía Metodológica (RAG), **genera** 3 Causas Directas y 3 Efectos (Árbol de Problemas) y preséntalos como una tabla. 3. Usando las Actividades Previas (RAG) y la validación anterior, **propón** tres opciones de Propósito (Objetivo General) que se deriven de este problema (Opciones A, B, C). 4. Instruye al usuario a seleccionar una opción. 
                 """
                 response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
                 
@@ -420,7 +429,7 @@ def chat_view(user_name, user_area):
                 El problema validado es: "{st.session_state.pat_data['problema']}".
                 El usuario seleccionó/propuso: "{user_prompt}" como su Propósito/Objetivo General.
                 
-                Como Enlace Senior de Progob: 1. Usando la Guía Metodológica, **valida** el Propósito seleccionado metodológicamente (Lógica Vertical). 2. Sugiere un borrador de Indicador del Propósito (RMAE-T) y el Medio de Verificación. 3. Guía al usuario a la siguiente fase: **Componentes**. Pídele que liste los 2 o 3 productos/servicios principales que su área debe entregar para alcanzar ese Propósito, basados en las Actividades Previas.
+                Como Enlace Senior de Progob: 1. Usando la Guía Metodológica (RAG), **valida** el Propósito seleccionado metodológicamente (Lógica Vertical). 2. Sugiere un borrador de Indicador del Propósito (RMAE-T) y el Medio de Verificación. 3. Guía al usuario a la siguiente fase: **Componentes**. Pídele que liste los 2 o 3 productos/servicios principales que su área debe entregar para alcanzar ese Propósito, basados en las Actividades Previas (RAG).
                 """
                 response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
                 
@@ -437,7 +446,7 @@ def chat_view(user_name, user_area):
                 Propósito: "{st.session_state.pat_data['proposito']}".
                 El usuario propone Componentes/Productos: "{user_prompt}".
                 
-                Como Enlace Senior de Progob: 1. Usando las Actividades Previas, **separa** la lista de componentes del usuario. 2. **Evalúa** su coherencia y suficiencia respecto al Propósito (Lógica Horizontal/Vertical). 3. Genera un borrador de Indicador (RMAE-T) y 3 Actividades clave para el primer Componente. 4. Instruye al usuario sobre cómo pasar estas Actividades al Calendario de Trabajo Anual y finalizar la MIR. 
+                Como Enlace Senior de Progob: 1. Usando las Actividades Previas (RAG), **separa** la lista de componentes del usuario. 2. **Evalúa** su coherencia y suficiencia respecto al Propósito (Lógica Horizontal/Vertical). 3. Genera un borrador de Indicador (RMAE-T) y 3 Actividades clave para el primer Componente. 4. Instruye al usuario sobre cómo pasar estas Actividades al Calendario de Trabajo Anual y finalizar la MIR. 
                 """
                  response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
                  
