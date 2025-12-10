@@ -22,6 +22,7 @@ REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACI
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
 
 # CLAVE API: Se leerá de st.secrets, usando la clave local como último fallback
+# ¡RECUERDA GENERAR UNA CLAVE NUEVA POR SEGURIDAD!
 DEEPSEEK_API_KEY_LOCAL = "sk-NUEVA_CLAVE_GENERADA_DEEPSEEK" 
 
 
@@ -200,9 +201,8 @@ def get_llm_response(system_prompt: str, user_query: str):
         # Se asume que la clave NUEVA ya fue configurada en secrets.toml
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
-        # Fallback si secrets falla o estamos en entorno local sin secrets
         api_key = DEEPSEEK_API_KEY_LOCAL
-        if not api_key or api_key == "sk-NUEVA_CLAVE_GENERADA_DEEPSEEK":
+        if not api_key:
              st.error("🚨 ERROR: La clave 'deepseek_api_key' no es válida o falta en `secrets.toml`.")
              return "❌ Conexión fallida. Por favor, verifica tu clave API."
     
@@ -247,7 +247,7 @@ def get_llm_response(system_prompt: str, user_query: str):
         if data and 'choices' in data and data['choices']:
             return data['choices'][0]['message']['content']
         else:
-            st.warning(f⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
+            st.warning(f"⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
             return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
 
     except requests.exceptions.RequestException as e:
