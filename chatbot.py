@@ -436,23 +436,108 @@ def handle_phase_logic(user_prompt: str, user_area: str):
     # FASE 2: PROBLEMA CENTRAL - VALIDACIÓN FINAL Y GENERACIÓN DE ÁRBOL
     # ----------------------------------------------------------------------
     elif current_phase == 'Diagnostico_Problema_Validacion':
-        # 1. El prompt del usuario es la confirmación/corrección final del problema. Lo guardamos como final.
-        st.session_state.pat_data['problema'] = user_prompt
         
+        # --- FIX: RECUPERACIÓN DE REDACCIÓN COMPLETA ---
+        
+        # 1. Intentar ver si el usuario solo puso una letra (a, b, c)
+        opcion_letra = user_prompt.strip().lower()
+        if opcion_letra in ['a', 'b', 'c']:
+            # Si solo puso la letra, buscamos en los mensajes anteriores la redacción
+            redaccion_completa = None
+            
+            # Recorrer el historial para encontrar la respuesta anterior del asistente que contenía las opciones
+            for message in reversed(st.session_state.messages):
+                if message["role"] == "assistant" and "opción a" in message["content"].lower():
+                    # Usar una regex simple para encontrar la redacción de la opción elegida
+                    match = re.search(rf'opción {opcion_letra}.*?(.*?)(?=\n\n|\nOpc|FIN_OPCIONES)', message["content"], re.IGNORECASE | re.DOTALL)
+                    if match:
+                        # Limpiar y guardar la redacción completa, quitando títulos o formato extra
+                        redaccion_completa = re.sub(r'\(enfoque.*?\)|redacción ajustada:', '', match.group(1)).strip()
+                        break
+            
+            if redaccion_completa:
+                # Si se recuperó la redacción, la guardamos y forzamos la confirmación en el siguiente prompt
+                st.session_state.pat_data['problema'] = redaccion_completa
+                st.session_state.pat_data['problema_borrador'] = redaccion_completa # Lo usamos para el contexto del siguiente paso
+                
+                query_llm = f"""
+                **FASE ACTUAL: Problema Central (Confirmación de Redacción).** {system_context_rag}
+                
+                Consultando el historial, has elegido la **Opción {opcion_letra.upper()}**.
+                La redacción es: **"{redaccion_completa}"**.
+
+                Para asegurar que tu avance se guarde correctamente en el PAT, necesito que **CONFIRMES esta redacción como el Problema Central definitivo**.
+                
+                **Instrucción:** Simplemente responde: **"Confirmo este Problema Central"** para avanzar al Análisis Causal.
+                """
+                response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+                # Mantenemos la fase para que el usuario confirme la redacción en el siguiente turno.
+                st.session_state.current_phase = 'Diagnostico_Problema_Validacion_Completa' 
+                return response_content # Retornamos y esperamos la confirmación
+
+            else:
+                 # Si la recuperación de la redacción falló, le pedimos al usuario que la escriba.
+                query_llm = f"""
+                **FASE ACTUAL: Problema Central (Confirmación fallida).** {system_context_rag}
+                
+                Has seleccionado la **Opción {opcion_letra.upper()}**. No pude recuperar la redacción completa de esa opción.
+                
+                Para evitar errores en el registro, por favor, **COPIA Y PEGA la redacción completa** del Problema Central que has elegido o propuesto.
+                """
+                response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+                # Mantenemos la fase para que el usuario escriba la redacción.
+                st.session_state.current_phase = 'Diagnostico_Problema_Validacion_Completa' 
+                return response_content # Retornamos y esperamos la redacción
+
+        # 2. Si el usuario proporcionó una redacción completa (no es 'a', 'b', o 'c')
+        else:
+            # Guardamos el prompt del usuario directamente como problema final
+            st.session_state.pat_data['problema'] = user_prompt
+            
+            # Pasamos a la siguiente fase real de generación de árbol
+            query_llm = f"""
+            **FASE ACTUAL: Problema Central (Confirmado).** {system_context_rag}
+            El Problema Central FINAL confirmado es: "{user_prompt}".
+            
+            Como Enlace Senior de Progob: 
+            1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
+            2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
+            3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
+            4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
+            """
+            response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+            # TRANSICIÓN A LA FASE: VALIDACIÓN DEL ÁRBOL
+            st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
+            return response_content
+    
+    # ----------------------------------------------------------------------
+    # FASE 2.5: PROBLEMA CENTRAL - RECUPERACIÓN DE REDACCIÓN COMPLETA
+    # ----------------------------------------------------------------------
+    elif current_phase == 'Diagnostico_Problema_Validacion_Completa':
+        
+        # Si el usuario responde 'Confirmo este Problema Central', usamos lo que ya guardamos en 'problema' en el paso anterior.
+        if "confirmo" in user_prompt.lower() and st.session_state.pat_data.get('problema'):
+            problema_final = st.session_state.pat_data.get('problema')
+        else:
+            # Si el usuario corrige o nos da la redacción que le faltó, guardamos ese nuevo prompt.
+            problema_final = user_prompt
+            st.session_state.pat_data['problema'] = problema_final
+        
+        # Ahora que tenemos el problema final, generamos el Árbol.
         query_llm = f"""
-        **FASE ACTUAL: Problema Central (Confirmado).** {system_context_rag}
-        El Problema Central FINAL confirmado es: "{user_prompt}".
+        **FASE ACTUAL: Problema Central (Validación y Árbol).** {system_context_rag}
+        El Problema Central FINAL confirmado es: "{problema_final}".
         
         Como Enlace Senior de Progob: 
         1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
-        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas y la diferencia entre Causas Directas e Indirectas.
+        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
         3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
         4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
-        # TRANSICIÓN A LA NUEVA FASE: VALIDACIÓN DEL ÁRBOL
+        # TRANSICIÓN A LA FASE: VALIDACIÓN DEL ÁRBOL
         st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
-
+        
     # ----------------------------------------------------------------------
     # FASE 3: ÁRBOL DE PROBLEMAS - VALIDACIÓN FINAL Y PROPUESTAS DE PROPÓSITO
     # ----------------------------------------------------------------------
@@ -580,6 +665,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         # Mapeo de fases y progreso para dar contexto a la IA
         fase_map = {
             'Diagnostico_Problema_Validacion': f"Validación del Problema: **{st.session_state.pat_data.get('problema_borrador', 'N/A')}**",
+            'Diagnostico_Problema_Validacion_Completa': f"Confirmación de redacción del Problema: **{st.session_state.pat_data.get('problema', 'N/A')}**",
             'Diagnostico_Arbol_Validacion': f"Validación del Árbol de Problemas con Problema: **{st.session_state.pat_data.get('problema', 'N/A')}**",
             'Proposito_Validacion': f"Validación del Propósito: **{st.session_state.pat_data.get('proposito_borrador', 'N/A')}**",
             'Componentes_Validacion': f"Validación de Componentes: **{st.session_state.pat_data.get('componentes_borrador', 'N/A')}**"
