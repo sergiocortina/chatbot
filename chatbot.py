@@ -263,7 +263,6 @@ def get_llm_response(system_prompt: str, user_query: str):
         # Lectura exclusiva de la clave desde Streamlit Secrets
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
-        st.error("🚨 ERROR: La clave 'deepseek_api_key' no se encuentra en `secrets.toml`.")
         return iter(["❌ Conexión fallida. Por favor, verifica tu clave API."])
     
     # --- INYECCIÓN RAG CRÍTICA (Añadimos los nuevos contenidos) ---
@@ -305,15 +304,22 @@ def get_llm_response(system_prompt: str, user_query: str):
         "max_tokens": 4000
     }
     
-    # Modificamos la lógica para usar streaming (Deepseek soporta streaming con el parámetro `stream: true`)
-    # Nota: Aunque Deepseek soporta streaming, el uso directo de requests.post sin un iterador en Streamlit 
-    # es complejo. Usaremos la solución de obtener el texto completo primero y luego stremearlo en Streamlit, 
-    # lo cual cumple con el requerimiento UX de "ver cómo se teclea".
-
+    # Usamos la conexión síncrona, pero con manejo de errores más específico.
     try:
-        with st.spinner("🔍 Consultando la base de conocimiento Progob..."):
-            response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
+        # Nota: quitamos st.spinner de aquí para que Streamlit se sienta más rápido.
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+        
+        # Manejo específico del error 400
+        if response.status_code == 400:
+             # Intentamos leer el mensaje de error de Deepseek
+             try:
+                 error_data = response.json()
+                 error_message = error_data.get('error', {}).get('message', 'Solicitud incorrecta (400 Bad Request).')
+                 return iter([f"❌ Error en la comunicación con la API. Detalle: {error_message}"])
+             except:
+                 return iter([f"❌ Error en la comunicación con la API. Detalle: 400 Client Error: Bad Request."])
+
+        response.raise_for_status() # Lanza excepción para otros errores HTTP 4xx/5xx
         
         data = response.json()
         
@@ -323,21 +329,20 @@ def get_llm_response(system_prompt: str, user_query: str):
             
             # Generador para simular el tecleo (devuelve fragmentos)
             def stream_generator():
-                for word in full_response.split():
-                    yield word + " "
-                    time.sleep(0.02) # Pequeña pausa para el efecto visual
+                for char in full_response:
+                    yield char
+                    time.sleep(0.005) # Pequeña pausa para el efecto visual
             
             return stream_generator()
         else:
-            st.warning(f"⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
             return iter([f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"])
 
     except requests.exceptions.RequestException as e:
-        st.error(f"❌ Error en la comunicación con la API. Detalle: {e}")
-        return iter([f"❌ Error de comunicación. Detalle: {e}"])
+        # Errores de red o timeout
+        return iter([f"❌ Error en la comunicación con la API. Detalle: {e}"])
     except Exception as e:
-        st.error(f"❌ Error interno al procesar la respuesta. Detalle: {e}")
-        return iter(["❌ Error interno. Revisa el código de procesamiento."])
+        # Error interno
+        return iter([f"❌ Error interno al procesar la respuesta. Detalle: {e}"])
 
 
 # --------------------------------------------------------------------------
@@ -382,14 +387,12 @@ def save_pat_progress(user_area, pat_data):
 def generate_pdf_conversation(messages, user_area):
     """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
     
-    # FIX: Usamos encoding='utf-8' al inicializar FPDF.
-    pdf = FPDF(unit="mm", format="A4", orientation="P", font_directory=None, encoding='utf-8') 
+    # FIX FPDF: Eliminamos 'font_directory=None'
+    pdf = FPDF(unit="mm", format="A4", orientation="P", encoding='utf-8') 
     
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     
-    # Título (usando una fuente compatible con UTF-8 si fuera posible, pero Arial en fpdf es limitada. 
-    # Usaremos el set_font y haremos la limpieza de texto al pasarlo)
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "Transcripción de la Asesoría Progob (MIR)", 0, 1, "C")
     pdf.set_font("Arial", "", 10)
@@ -403,24 +406,23 @@ def generate_pdf_conversation(messages, user_area):
         
         pdf.set_font("Arial", "B", 10)
         pdf.set_fill_color(200, 220, 255) if role == "ASSISTANT" else pdf.set_fill_color(240, 240, 240)
-        # Limpiamos el título del rol de cualquier caracter especial que pueda causar problemas
         role_title = f"--- {role} ---"
         pdf.cell(0, 7, role_title, 0, 1, 'L', 1)
         
         pdf.set_font("Arial", "", 10)
-        # Limpiamos el contenido de markdown o caracteres no ASCII simples antes de pasarlo a fpdf
+        
+        # Limpiamos el contenido de markdown y caracteres que fpdf no maneja bien
         content_clean = content.replace('>', '').replace('*', '').replace('•', '-')
         
-        # FIX CLAVE: Para evitar el error de codificación en el core de fpdf, usamos .encode('latin1', 'replace')
+        # Usamos .encode('latin1', 'replace') para manejar cualquier caracter que FPDF no pueda, 
+        # y luego lo decodificamos de vuelta para pasarlo a multi_cell.
         try:
             pdf.multi_cell(0, 5, content_clean.encode('latin1', 'replace').decode('latin1'))
         except Exception as e:
-            # En caso de que falle la multicell, intentamos con un fallback más simple
             pdf.multi_cell(0, 5, "ERROR: Contenido con caracteres no compatibles para PDF.")
             
         pdf.ln(2)
 
-    # El output ahora se codifica a UTF-8, lo cual es más robusto para la transferencia de archivos.
     return pdf.output(dest='S').encode('utf-8') 
 
 def load_pat_progress(user_area):
@@ -686,7 +688,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         """
         response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
     
-    # 2. Convertir el generador en string (para guardar en el historial)
+    # 2. Obtener el contenido completo del generador
     response_content = "".join(list(response_generator))
 
     # 3. Guardar avance después de cada paso lógico y actualizar el estado de descarga
@@ -759,9 +761,10 @@ def chat_view(user_name, user_area):
                  
                  # Usamos Streamlit para escribir la respuesta en el chat en tiempo real
                  with st.chat_message("assistant"):
+                     # El generador devuelve los trozos de la respuesta.
                      full_response_content = st.write_stream(response_generator)
                  
-                 # Guardamos la respuesta COMPLETA (ya stremeada) en el historial de mensajes
+                 # Guardamos la respuesta COMPLETA (ya streameada) en el historial de mensajes
                  st.session_state.messages.append({"role": "assistant", "content": full_response_content})
                  st.session_state.current_phase = 'Diagnostico_Problema_Definicion'
                  # No hacemos rerun aquí, ya que la respuesta se escribió con st.write_stream
@@ -837,8 +840,7 @@ def chat_view(user_name, user_area):
 
 
     # --- 2. Mostrar Historial del Chat ---
-    # Si estamos en la lógica de inicio, ya se escribió el mensaje inicial, 
-    # por lo que el siguiente loop debe mostrar el historial completo.
+    # Este loop muestra el historial y es crucial
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -848,21 +850,33 @@ def chat_view(user_name, user_area):
     if st.session_state.current_phase != 'Fin_MIR':
         if user_prompt := st.chat_input("Escribe aquí tu respuesta o propuesta..."):
             
-            # 3.1 Mostrar la entrada del usuario inmediatamente
+            # Mostrar la entrada del usuario inmediatamente
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             
             # 3.2 Llamar a la nueva lógica de fases y obtener el contenido completo
-            # Note: handle_phase_logic ya devuelve el string completo y guarda el avance.
+            # La función devuelve el string completo, pero se genera con delay en el LLM.
             response_content = handle_phase_logic(user_prompt, user_area)
             
             # 3.3 Añadir respuesta del asistente con streaming simulado
             with st.chat_message("assistant"):
                 # Generamos el efecto de tecleo aquí
-                stream_generator = (word + " " for word in response_content.split())
-                full_response_streamed = st.write_stream(stream_generator)
+                # Usamos un generador más simple basado en caracteres si la división por palabras es muy rápida
+                def stream_simulator(text):
+                    for char in text:
+                        yield char
+                        # Controlamos la velocidad: más lento para saltos de línea/puntuación
+                        if char in ['.', '!', '?']:
+                             time.sleep(0.1)
+                        elif char in [',', ';', ':']:
+                             time.sleep(0.05)
+                        else:
+                             time.sleep(0.005)
+                
+                # Streamlit escribe la respuesta simulada
+                st.write_stream(stream_simulator(response_content))
 
             # 3.4 Guardar la respuesta completa (ya streameada) en el historial
-            st.session_state.messages.append({"role": "assistant", "content": full_response_content})
+            st.session_state.messages.append({"role": "assistant", "content": response_content})
             
             st.rerun()
 
