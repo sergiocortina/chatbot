@@ -6,3 +6,4 @@ pypdf
 gspread
 oauth2client
 unidecode
+fpdf
