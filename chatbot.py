@@ -5,8 +5,11 @@ import json
 import io
 import requests 
 import re 
-import time # Necesario para la simulación de tecleo (streaming)
+import time 
 from fpdf import FPDF 
+
+# Límite de caracteres para los documentos grandes en el RAG (para no exceder el límite de tokens)
+RAG_CHUNK_SIZE = 8000 # Reducido de 15000 para dejar espacio al historial y a la respuesta.
 
 try:
     from unidecode import unidecode 
@@ -141,7 +144,7 @@ def extract_text_from_pdf(pdf_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text() or ""
-        return text # Devolvemos el texto completo para el RAG
+        return text[:RAG_CHUNK_SIZE] # Limitamos el tamaño del chunk para la carga inicial
     except Exception as e:
         return f"ERROR al leer el PDF: {e}"
 
@@ -165,35 +168,33 @@ def load_area_context(user_area):
     }
 
     # --- 1. CARGA DE ATRIBUCIONES (REGLAMENTO PDF) ---
-    reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
+    # Nota: Aquí usamos el texto completo para el RAG para la búsqueda heurística.
+    full_reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
     
-    if "ERROR" in reglamento_text:
-        context["atribuciones"] = f"ADVERTENCIA (Reglamento): {reglamento_text}"
-        context["atribuciones_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({reglamento_text})"
+    if "ERROR" in full_reglamento_text:
+        context["atribuciones"] = f"ADVERTENCIA (Reglamento): {full_reglamento_text}"
+        context["atribuciones_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({full_reglamento_text})"
     else:
-        context["atribuciones"] = reglamento_text
-        # Intento simplificado para encontrar la sección de atribuciones de la UR
+        context["atribuciones"] = full_reglamento_text
+        # Limitamos el texto que se inyecta en el RAG para que no sature
+        st.session_state['reglamento_content'] = full_reglamento_text[:RAG_CHUNK_SIZE]
+        
+        # Generamos resumen para la bienvenida
         search_key = user_area.strip().upper()
-        # Busca un patrón típico de atribuciones (Artículos, Secciones, Títulos)
-        # Se usará un LLM o una búsqueda heurística más simple en un entorno real. Aquí usamos una heurística.
-        match = re.search(r'(TÍTULO|CAPÍTULO|ARTÍCULO)\s+.*' + re.escape(search_key) + r'.*?(ARTÍCULO|CAPÍTULO|TÍTULO|REFORMADO)', reglamento_text, re.DOTALL | re.IGNORECASE)
+        match = re.search(r'(TÍTULO|CAPÍTULO|ARTÍCULO)\s+.*' + re.escape(search_key) + r'.*?(ARTÍCULO|CAPÍTULO|TÍTULO|REFORMADO)', full_reglamento_text, re.DOTALL | re.IGNORECASE)
         
         if match:
-             # Si encuentra un fragmento específico, lo resume.
              fragment = match.group(0)
              context["atribuciones_resumen"] = f"Fragmento Clave encontrado (Art. o Cap.): {fragment[:250].strip()}..."
         else:
-             # Validación general si no encuentra un artículo específico.
              context["atribuciones_resumen"] = f"Reglamento Interior cargado. El asesor lo usará para validar su competencia legal y alineación a la Ley Orgánica."
         
-        st.session_state['reglamento_content'] = reglamento_text 
-        
     # --- 2. CARGA DE GUÍA METODOLÓGICA (PDF) ---
-    guia_text = extract_text_from_pdf(GUIDE_FILE)
-    if "ERROR" not in guia_text:
-        context["guia_metodologica"] = guia_text 
+    full_guia_text = extract_text_from_pdf(GUIDE_FILE)
+    if "ERROR" not in full_guia_text:
+        context["guia_metodologica"] = full_guia_text
         context["guia_resumen"] = f"Guía Metodológica de PbR/MML cargada."
-        st.session_state['guia_content'] = guia_text 
+        st.session_state['guia_content'] = full_guia_text[:RAG_CHUNK_SIZE]
 
     # --- 3. CARGA DE DOCUMENTOS ESTRATÉGICOS (RAG) ---
     docs_to_load = {
@@ -203,11 +204,11 @@ def load_area_context(user_area):
     }
     
     for key, (path, name) in docs_to_load.items():
-        content = extract_text_from_pdf(path)
-        if "ERROR" not in content:
-            context[f"{key}_content"] = content
-            context[f"{key}_resumen"] = f"Documento de {name} cargado ({len(content)} caracteres)."
-            st.session_state[f"{key}_content"] = content
+        full_content = extract_text_from_pdf(path)
+        if "ERROR" not in full_content:
+            context[f"{key}_content"] = full_content
+            context[f"{key}_resumen"] = f"Documento de {name} cargado ({len(full_content)} caracteres)."
+            st.session_state[f"{key}_content"] = full_content[:RAG_CHUNK_SIZE] # Aplicamos el límite RAG
         else:
              context[f"{key}_resumen"] = f"ADVERTENCIA: {name} no encontrado o con error."
 
@@ -215,7 +216,6 @@ def load_area_context(user_area):
     if os.path.exists(ACTIVIDADES_FILE):
         try:
             df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
-            # ... (Lógica de filtrado y resumen de actividades) ...
             df_actividades.columns = df_actividades.columns.str.lower()
             
             if 'area' in df_actividades.columns and 'actividad' in df_actividades.columns:
@@ -231,13 +231,12 @@ def load_area_context(user_area):
                 ]
                 
                 if not filtered_df.empty:
-                    # Almacenamos el contenido completo para el RAG
                     actividades_list = filtered_df['actividad'].tolist()
                     context["actividades_previas"] = "\n* " + "\n* ".join(actividades_list)
-                    st.session_state['actividades_content'] = context["actividades_previas"] # Para RAG completo
-
+                    st.session_state['actividades_content'] = context["actividades_previas"] # Completo para RAG
+                    
                     # Resumen para la bienvenida
-                    top_activities = "\n".join([f"* {a}" for a in actividades_list]) # Listamos TODAS para el inicio
+                    top_activities = "\n".join([f"* {a}" for a in actividades_list])
                     context["actividades_resumen"] = f"Se encontraron **{len(actividades_list)} actividades** previas. Listado Completo:\n{top_activities}"
 
                 else:
@@ -265,13 +264,13 @@ def get_llm_response(system_prompt: str, user_query: str):
     except KeyError:
         return iter(["❌ Conexión fallida. Por favor, verifica tu clave API."])
     
-    # --- INYECCIÓN RAG CRÍTICA (Añadimos los nuevos contenidos) ---
+    # --- INYECCIÓN RAG CRÍTICA (Se mantiene la inyección de los chunks limitados) ---
     rag_context = ""
     if 'reglamento_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (REGLAMENTO INTERIOR) ---\n{st.session_state['reglamento_content']}"
     if 'guia_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GUÍA METODOLÓGICA) ---\n{st.session_state['guia_content']}"
     if 'actividades_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ACTIVIDADES PREVIAS DEL ÁREA) ---\n{st.session_state['actividades_content']}"
     
-    # Nuevos documentos RAG
+    # Nuevos documentos RAG (ya limitados en load_area_context)
     if 'ods_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ODS) ---\n{st.session_state['ods_content']}"
     if 'gdm_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GDM) ---\n{st.session_state['gdm_content']}"
     if 'manual_ind_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (MANUAL INDICADORES) ---\n{st.session_state['manual_ind_content']}"
@@ -279,7 +278,8 @@ def get_llm_response(system_prompt: str, user_query: str):
     # Documentos personalizados
     if 'custom_docs_content' in st.session_state:
         for doc_name, doc_content in st.session_state['custom_docs_content'].items():
-            rag_context += f"\n\n--- CONTEXTO RAG (DOCUMENTO PERSONALIZADO: {doc_name}) ---\n{doc_content}"
+            # También limitamos el tamaño de los documentos personalizados
+            rag_context += f"\n\n--- CONTEXTO RAG (DOCUMENTO PERSONALIZADO: {doc_name}) ---\n{doc_content[:RAG_CHUNK_SIZE]}"
 
 
     final_system_prompt = system_prompt.replace("{user_area_context}", st.session_state['area_context']['atribuciones_resumen'])
@@ -301,17 +301,15 @@ def get_llm_response(system_prompt: str, user_query: str):
         "model": "deepseek-chat", 
         "messages": messages,
         "temperature": 0.3, 
-        "max_tokens": 4000
+        "max_tokens": 4000 # Mantener un límite razonable para la respuesta
     }
     
     # Usamos la conexión síncrona, pero con manejo de errores más específico.
     try:
-        # Nota: quitamos st.spinner de aquí para que Streamlit se sienta más rápido.
         response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
         
         # Manejo específico del error 400
         if response.status_code == 400:
-             # Intentamos leer el mensaje de error de Deepseek
              try:
                  error_data = response.json()
                  error_message = error_data.get('error', {}).get('message', 'Solicitud incorrecta (400 Bad Request).')
@@ -319,29 +317,25 @@ def get_llm_response(system_prompt: str, user_query: str):
              except:
                  return iter([f"❌ Error en la comunicación con la API. Detalle: 400 Client Error: Bad Request."])
 
-        response.raise_for_status() # Lanza excepción para otros errores HTTP 4xx/5xx
+        response.raise_for_status() 
         
         data = response.json()
         
         if data and 'choices' in data and data['choices']:
-            # Devolvemos la respuesta completa como un iterador (generador de palabras)
             full_response = data['choices'][0]['message']['content']
             
-            # Generador para simular el tecleo (devuelve fragmentos)
             def stream_generator():
                 for char in full_response:
                     yield char
-                    time.sleep(0.005) # Pequeña pausa para el efecto visual
+                    time.sleep(0.005) 
             
             return stream_generator()
         else:
             return iter([f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"])
 
     except requests.exceptions.RequestException as e:
-        # Errores de red o timeout
         return iter([f"❌ Error en la comunicación con la API. Detalle: {e}"])
     except Exception as e:
-        # Error interno
         return iter([f"❌ Error interno al procesar la respuesta. Detalle: {e}"])
 
 
@@ -387,8 +381,8 @@ def save_pat_progress(user_area, pat_data):
 def generate_pdf_conversation(messages, user_area):
     """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
     
-    # FIX FPDF: Eliminamos 'font_directory=None'
-    pdf = FPDF(unit="mm", format="A4", orientation="P", encoding='utf-8') 
+    # FIX FPDF: Eliminamos 'font_directory=None' y 'encoding='utf-8'' para evitar el TypeError
+    pdf = FPDF(unit="mm", format="A4", orientation="P") 
     
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -716,7 +710,6 @@ def chat_view(user_name, user_area):
         if st.session_state.pat_data.get('proposito'):
             st.session_state.current_phase = 'Componentes_Definicion'
         elif st.session_state.pat_data.get('problema'):
-            # Si solo hay problema, lo más probable es que tenga que validar el árbol o definir el propósito.
             st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
         else:
             st.session_state.current_phase = 'inicio'
@@ -824,7 +817,8 @@ def chat_view(user_name, user_area):
             if 'custom_docs_content' not in st.session_state:
                 st.session_state['custom_docs_content'] = {}
             
-            st.session_state['custom_docs_content'][file_name] = content
+            # Solo guardamos un chunk para que no exceda el límite de tokens RAG
+            st.session_state['custom_docs_content'][file_name] = content[:RAG_CHUNK_SIZE]
             st.sidebar.success(f"✅ Documento '{file_name}' cargado al contexto RAG.")
             # Reforzamos el mensaje de bienvenida con el nuevo contexto
             st.session_state.messages.append({"role": "assistant", "content": f"**Progob Nota:** El documento '{file_name}' ha sido incorporado al contexto de conocimiento. Lo usaré para alinear mis respuestas a sus lineamientos internos."})
@@ -854,13 +848,13 @@ def chat_view(user_name, user_area):
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             
             # 3.2 Llamar a la nueva lógica de fases y obtener el contenido completo
-            # La función devuelve el string completo, pero se genera con delay en el LLM.
             response_content = handle_phase_logic(user_prompt, user_area)
             
             # 3.3 Añadir respuesta del asistente con streaming simulado
             with st.chat_message("assistant"):
                 # Generamos el efecto de tecleo aquí
-                # Usamos un generador más simple basado en caracteres si la división por palabras es muy rápida
+                
+                # Usamos un generador más simple basado en caracteres
                 def stream_simulator(text):
                     for char in text:
                         yield char
