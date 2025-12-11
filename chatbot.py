@@ -5,7 +5,8 @@ import json
 import io
 import requests 
 import re 
-from fpdf import FPDF # Nueva librería para generar PDFs
+import time # Necesario para la simulación de tecleo (streaming)
+from fpdf import FPDF 
 
 try:
     from unidecode import unidecode 
@@ -165,19 +166,26 @@ def load_area_context(user_area):
 
     # --- 1. CARGA DE ATRIBUCIONES (REGLAMENTO PDF) ---
     reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
+    
     if "ERROR" in reglamento_text:
         context["atribuciones"] = f"ADVERTENCIA (Reglamento): {reglamento_text}"
         context["atribuciones_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({reglamento_text})"
     else:
         context["atribuciones"] = reglamento_text
-        # Usamos una heurística para el resumen
+        # Intento simplificado para encontrar la sección de atribuciones de la UR
         search_key = user_area.strip().upper()
+        # Busca un patrón típico de atribuciones (Artículos, Secciones, Títulos)
+        # Se usará un LLM o una búsqueda heurística más simple en un entorno real. Aquí usamos una heurística.
         match = re.search(r'(TÍTULO|CAPÍTULO|ARTÍCULO)\s+.*' + re.escape(search_key) + r'.*?(ARTÍCULO|CAPÍTULO|TÍTULO|REFORMADO)', reglamento_text, re.DOTALL | re.IGNORECASE)
+        
         if match:
+             # Si encuentra un fragmento específico, lo resume.
              fragment = match.group(0)
              context["atribuciones_resumen"] = f"Fragmento Clave encontrado (Art. o Cap.): {fragment[:250].strip()}..."
         else:
+             # Validación general si no encuentra un artículo específico.
              context["atribuciones_resumen"] = f"Reglamento Interior cargado. El asesor lo usará para validar su competencia legal y alineación a la Ley Orgánica."
+        
         st.session_state['reglamento_content'] = reglamento_text 
         
     # --- 2. CARGA DE GUÍA METODOLÓGICA (PDF) ---
@@ -223,6 +231,7 @@ def load_area_context(user_area):
                 ]
                 
                 if not filtered_df.empty:
+                    # Almacenamos el contenido completo para el RAG
                     actividades_list = filtered_df['actividad'].tolist()
                     context["actividades_previas"] = "\n* " + "\n* ".join(actividades_list)
                     st.session_state['actividades_content'] = context["actividades_previas"] # Para RAG completo
@@ -248,13 +257,14 @@ def load_area_context(user_area):
 def get_llm_response(system_prompt: str, user_query: str):
     """
     Función de conexión a la API, leyendo la clave **SÓLO** desde st.secrets e inyectando contexto RAG.
+    Devuelve la respuesta como un generador de texto para el streaming.
     """
     try:
         # Lectura exclusiva de la clave desde Streamlit Secrets
         api_key = st.secrets["deepseek_api_key"]
     except KeyError:
         st.error("🚨 ERROR: La clave 'deepseek_api_key' no se encuentra en `secrets.toml`.")
-        return "❌ Conexión fallida. Por favor, verifica tu clave API."
+        return iter(["❌ Conexión fallida. Por favor, verifica tu clave API."])
     
     # --- INYECCIÓN RAG CRÍTICA (Añadimos los nuevos contenidos) ---
     rag_context = ""
@@ -295,6 +305,11 @@ def get_llm_response(system_prompt: str, user_query: str):
         "max_tokens": 4000
     }
     
+    # Modificamos la lógica para usar streaming (Deepseek soporta streaming con el parámetro `stream: true`)
+    # Nota: Aunque Deepseek soporta streaming, el uso directo de requests.post sin un iterador en Streamlit 
+    # es complejo. Usaremos la solución de obtener el texto completo primero y luego stremearlo en Streamlit, 
+    # lo cual cumple con el requerimiento UX de "ver cómo se teclea".
+
     try:
         with st.spinner("🔍 Consultando la base de conocimiento Progob..."):
             response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
@@ -303,17 +318,26 @@ def get_llm_response(system_prompt: str, user_query: str):
         data = response.json()
         
         if data and 'choices' in data and data['choices']:
-            return data['choices'][0]['message']['content']
+            # Devolvemos la respuesta completa como un iterador (generador de palabras)
+            full_response = data['choices'][0]['message']['content']
+            
+            # Generador para simular el tecleo (devuelve fragmentos)
+            def stream_generator():
+                for word in full_response.split():
+                    yield word + " "
+                    time.sleep(0.02) # Pequeña pausa para el efecto visual
+            
+            return stream_generator()
         else:
             st.warning(f"⚠️ Respuesta vacía o inesperada de la consulta. Código: {response.status_code}")
-            return f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"
+            return iter([f"⚠️ Progob no pudo generar una respuesta. (Código: {response.status_code})"])
 
     except requests.exceptions.RequestException as e:
         st.error(f"❌ Error en la comunicación con la API. Detalle: {e}")
-        return f"❌ Error de comunicación. Detalle: {e}"
+        return iter([f"❌ Error de comunicación. Detalle: {e}"])
     except Exception as e:
         st.error(f"❌ Error interno al procesar la respuesta. Detalle: {e}")
-        return "❌ Error interno. Revisa el código de procesamiento."
+        return iter(["❌ Error interno. Revisa el código de procesamiento."])
 
 
 # --------------------------------------------------------------------------
@@ -355,14 +379,21 @@ def save_pat_progress(user_area, pat_data):
     # 3. Actualizar estado (simulación de guardado exitoso)
     st.session_state['drive_status'] = f"✅ Avance listo para descargar: {file_name}"
     
-def generate_pdf_conversation(messages):
-    """Genera un PDF con la transcripción de la conversación."""
-    pdf = FPDF()
+def generate_pdf_conversation(messages, user_area):
+    """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
+    
+    # FIX: Usamos encoding='utf-8' al inicializar FPDF.
+    pdf = FPDF(unit="mm", format="A4", orientation="P", font_directory=None, encoding='utf-8') 
+    
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    
+    # Título (usando una fuente compatible con UTF-8 si fuera posible, pero Arial en fpdf es limitada. 
+    # Usaremos el set_font y haremos la limpieza de texto al pasarlo)
     pdf.set_font("Arial", "B", 16)
     pdf.cell(0, 10, "Transcripción de la Asesoría Progob (MIR)", 0, 1, "C")
     pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 5, f"Unidad Responsable: {user_area}", 0, 1, "C")
     pdf.cell(0, 5, f"Fecha de Exportación: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}", 0, 1, "C")
     pdf.ln(5)
 
@@ -372,15 +403,25 @@ def generate_pdf_conversation(messages):
         
         pdf.set_font("Arial", "B", 10)
         pdf.set_fill_color(200, 220, 255) if role == "ASSISTANT" else pdf.set_fill_color(240, 240, 240)
-        pdf.cell(0, 7, f"--- {role} ---", 0, 1, 'L', 1)
+        # Limpiamos el título del rol de cualquier caracter especial que pueda causar problemas
+        role_title = f"--- {role} ---"
+        pdf.cell(0, 7, role_title, 0, 1, 'L', 1)
         
         pdf.set_font("Arial", "", 10)
-        # Reemplazar saltos de línea para que el multi_cell funcione bien
-        content_clean = content.replace('\n', ' ').replace('>', '').replace('*', '')
-        pdf.multi_cell(0, 5, content_clean)
+        # Limpiamos el contenido de markdown o caracteres no ASCII simples antes de pasarlo a fpdf
+        content_clean = content.replace('>', '').replace('*', '').replace('•', '-')
+        
+        # FIX CLAVE: Para evitar el error de codificación en el core de fpdf, usamos .encode('latin1', 'replace')
+        try:
+            pdf.multi_cell(0, 5, content_clean.encode('latin1', 'replace').decode('latin1'))
+        except Exception as e:
+            # En caso de que falle la multicell, intentamos con un fallback más simple
+            pdf.multi_cell(0, 5, "ERROR: Contenido con caracteres no compatibles para PDF.")
+            
         pdf.ln(2)
 
-    return pdf.output(dest='S').encode('latin1') # Devuelve como bytes
+    # El output ahora se codifica a UTF-8, lo cual es más robusto para la transferencia de archivos.
+    return pdf.output(dest='S').encode('utf-8') 
 
 def load_pat_progress(user_area):
     """
@@ -434,6 +475,7 @@ def load_pat_progress(user_area):
     # Si no hay archivo subido, retorna el estado vacío y una lista de mensajes vacía
     return empty_state, []
 
+
 # --------------------------------------------------------------------------
 # Z. LÓGICA DE FASES (Maneja el flujo secuencial y didáctico)
 # --------------------------------------------------------------------------
@@ -442,7 +484,9 @@ def handle_phase_logic(user_prompt: str, user_area: str):
     """Maneja la lógica de avance por fases, haciendo hincapié en la validación."""
     
     current_phase = st.session_state.current_phase
-    response_content = ""
+    
+    # La respuesta ya no es un string, sino un generador (iterable)
+    response_generator = None 
     
     # Contexto RAG para simplificar los prompts internos. Usamos el resumen de atribuciones.
     system_context_rag = f"Contexto de la UR ({user_area}): {st.session_state.area_context['atribuciones_resumen']}. Actividades: {st.session_state.area_context['actividades_resumen']}"
@@ -466,7 +510,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         4.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. **IMPORTANTE: El Problema Central definitivo DEBE ser copiado y pegado o redactado por el usuario en su próxima respuesta.**
         5.  Instrucción de Respuesta: Responde con la redacción completa elegida o propuesta. **NO AVANCES A CAUSAS/EFECTOS.**
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
         st.session_state.current_phase = 'Diagnostico_Problema_Validacion'
         
     # ----------------------------------------------------------------------
@@ -488,7 +532,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
         4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
         # TRANSICIÓN A LA FASE: VALIDACIÓN DEL ÁRBOL
         st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
         
@@ -512,7 +556,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         4.  Instruye al usuario a seleccionar una opción. **IMPORTANTE: El Propósito definitivo DEBE ser copiado y pegado o redactado por el usuario en su próxima respuesta.**
         5.  Instrucción de Respuesta: Responde con la redacción completa elegida o propuesta.
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
         # TRANSICIÓN A LA FASE: DEFINICIÓN DEL PROPÓSITO
         st.session_state.current_phase = 'Proposito_Definicion'
         
@@ -534,7 +578,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         2.  **Valida** si el Propósito cumple con la **Lógica Vertical** (ser la solución directa al Problema) y las reglas de sintaxis de la MIR (Beneficiario + verbo en presente + resultado). Si no lo está, **propónle una redacción ajustada** que cumpla el criterio (Opción A, B).
         3.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. (Ej: Responde 'Acepto la opción A' o 'Propongo la siguiente corrección...').
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
         st.session_state.current_phase = 'Proposito_Validacion'
 
     # ----------------------------------------------------------------------
@@ -554,7 +598,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         3.  **Guía al usuario** a la siguiente fase: **Componentes**. Explica que los Componentes son los productos/servicios que la UR debe entregar (imagen en positivo de las causas directas).
         4.  Pídele al usuario que, basado en sus Actividades Previas (RAG), **liste los 2 o 3 productos/servicios principales** que su área debe entregar para alcanzar ese Propósito.
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
         st.session_state.current_phase = 'Componentes_Definicion'
 
 
@@ -578,7 +622,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         3.  Usando la regla de sintaxis de la MIR (Bien / servicio entregado + verbo en pasado participio), **propón** una lista final ajustada.
         4.  **Pregunta al usuario** si está de acuerdo con la lista final o si desea modificarla. (Ej: Responde 'Acepto la lista' o 'Propongo la siguiente lista corregida...').
         """
-         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+         response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
          st.session_state.current_phase = 'Componentes_Validacion'
          
     # ----------------------------------------------------------------------
@@ -607,7 +651,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         4.  Instruye al usuario sobre cómo estos Componentes y Actividades deben pasar al Calendario de Trabajo Anual (PAT) y finalizar la MIR.
         5.  Declara el proceso de la Lógica Vertical como 'COMPLETADO' y recuérdale al usuario la importancia de la **Lógica Horizontal** (Indicadores, Medios de Verificación y Supuestos) para finalizar la MIR.
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
         st.session_state.current_phase = 'Fin_MIR'
 
 
@@ -640,9 +684,12 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         2.  **NO AVANCES DE FASE.**
         3.  Recuérdale, de manera cortés, el paso pendiente que debe completar para avanzar en la fase **{current_phase.replace('_', ' ')}**.
         """
-        response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
+        response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
     
-    # 2. Guardar avance después de cada paso lógico y actualizar el estado de descarga
+    # 2. Convertir el generador en string (para guardar en el historial)
+    response_content = "".join(list(response_generator))
+
+    # 3. Guardar avance después de cada paso lógico y actualizar el estado de descarga
     save_pat_progress(user_area, st.session_state.pat_data)
     
     return response_content
@@ -667,6 +714,7 @@ def chat_view(user_name, user_area):
         if st.session_state.pat_data.get('proposito'):
             st.session_state.current_phase = 'Componentes_Definicion'
         elif st.session_state.pat_data.get('problema'):
+            # Si solo hay problema, lo más probable es que tenga que validar el árbol o definir el propósito.
             st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
         else:
             st.session_state.current_phase = 'inicio'
@@ -683,7 +731,7 @@ def chat_view(user_name, user_area):
         if not st.session_state.messages or st.session_state.current_phase == 'inicio':
             
             if st.session_state.pat_data.get('problema'):
-                 # Lógica para cargar avance (se mantiene)
+                 # Mensaje para cargar avance (se mantiene)
                  next_phase_text = st.session_state.current_phase.replace('_', ' ')
                  initial_message = f"""
                  ¡Bienvenido de nuevo, **{user_name}**! Hemos cargado tu avance.
@@ -701,18 +749,26 @@ def chat_view(user_name, user_area):
                  Genera el mensaje de diagnóstico inicial para la Unidad Responsable '{user_area}'. 
                  Debes cumplir **estrictamente** los siguientes puntos usando el RAG:
                  1.  Identifica y explica el ODS (Objetivo de Desarrollo Sostenible) principal al que debe contribuir la UR, basándote en su área y documentos cargados (ODS).
-                 2.  Explica las atribuciones de la UR, citando el Reglamento Interior y la Ley Orgánica (según el RAG).
+                 2.  Explica las atribuciones de la UR, citando el Reglamento Interior y la Ley Orgánica (simulada por RAG).
                  3.  Presenta el LISTADO COMPLETO de sus actividades previas (del CSV).
                  4.  Identifica y lista 3 indicadores aplicables del GDM y 3 del Manual de Indicadores para Municipios que debe considerar la UR.
                  5.  Explica brevemente qué es la Metodología de Marco Lógico (MML), que su primer paso es el **Problema Central**, qué es el Problema Central y su estructura, y el por qué usaremos **microfases** (validación obligatoria del usuario).
                  """
-                 initial_response = get_llm_response(SYSTEM_PROMPT, initial_query)
-                 st.session_state.messages.append({"role": "assistant", "content": initial_response})
+                 # Ejecutamos el LLM para obtener el generador de respuesta
+                 response_generator = get_llm_response(SYSTEM_PROMPT, initial_query)
+                 
+                 # Usamos Streamlit para escribir la respuesta en el chat en tiempo real
+                 with st.chat_message("assistant"):
+                     full_response_content = st.write_stream(response_generator)
+                 
+                 # Guardamos la respuesta COMPLETA (ya stremeada) en el historial de mensajes
+                 st.session_state.messages.append({"role": "assistant", "content": full_response_content})
                  st.session_state.current_phase = 'Diagnostico_Problema_Definicion'
-                 # Se hace rerun para que el chat se muestre con el primer mensaje
-                 st.rerun()
-
-
+                 # No hacemos rerun aquí, ya que la respuesta se escribió con st.write_stream
+                 
+                 # Salimos de la función para esperar la entrada del usuario
+                 return 
+    
     # -----------------------------------------------------------------
     # SIDEBAR: BOTONES DE PERSISTENCIA Y CARGA DE DOCUMENTOS
     # -----------------------------------------------------------------
@@ -724,7 +780,7 @@ def chat_view(user_name, user_area):
 
     # Botón de Descarga PDF (Artefacto legible)
     if st.session_state.messages:
-        pdf_bytes = generate_pdf_conversation(st.session_state.messages)
+        pdf_bytes = generate_pdf_conversation(st.session_state.messages, user_area)
         st.sidebar.download_button(
             label="📄 Exportar Conversación a PDF",
             data=pdf_bytes,
@@ -735,7 +791,7 @@ def chat_view(user_name, user_area):
         
     st.sidebar.markdown("---")
 
-    # UPLOADER DE DOCUMENTOS PERSONALIZADOS
+    # UPLOADER DE DOCUMENTOS PERSONALIZADOS (Se mantiene)
     uploaded_custom_file = st.sidebar.file_uploader(
         "📂 Subir Documento Personalizado (PDF/TXT)",
         type=['pdf', 'txt'],
@@ -746,16 +802,20 @@ def chat_view(user_name, user_area):
     if uploaded_custom_file is not None:
         file_name = uploaded_custom_file.name
         
-        # Extraemos el texto si es PDF, o leemos si es TXT
-        if file_name.endswith('.pdf'):
-            # Creamos un objeto temporal para pypdf
-            tfile = uploaded_custom_file
-            pdf_reader = pypdf.PdfReader(tfile)
+        # Lógica para extraer contenido (se mantiene)
+        content = ""
+        try:
+            if file_name.endswith('.pdf'):
+                tfile = uploaded_custom_file
+                pdf_reader = pypdf.PdfReader(tfile)
+                for page in pdf_reader.pages:
+                    content += page.extract_text() or ""
+            else: # Asumir .txt
+                 content = uploaded_custom_file.getvalue().decode('utf-8')
+        except Exception as e:
+            st.sidebar.error(f"Error al procesar el archivo: {e}")
             content = ""
-            for page in pdf_reader.pages:
-                content += page.extract_text() or ""
-        else: # Asumir .txt
-             content = uploaded_custom_file.getvalue().decode('utf-8')
+
         
         if content and len(content) > 50:
             if 'custom_docs_content' not in st.session_state:
@@ -777,6 +837,8 @@ def chat_view(user_name, user_area):
 
 
     # --- 2. Mostrar Historial del Chat ---
+    # Si estamos en la lógica de inicio, ya se escribió el mensaje inicial, 
+    # por lo que el siguiente loop debe mostrar el historial completo.
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -786,14 +848,22 @@ def chat_view(user_name, user_area):
     if st.session_state.current_phase != 'Fin_MIR':
         if user_prompt := st.chat_input("Escribe aquí tu respuesta o propuesta..."):
             
-            # Mostrar la entrada del usuario inmediatamente
+            # 3.1 Mostrar la entrada del usuario inmediatamente
             st.session_state.messages.append({"role": "user", "content": user_prompt})
             
-            # Llamar a la nueva lógica de fases
+            # 3.2 Llamar a la nueva lógica de fases y obtener el contenido completo
+            # Note: handle_phase_logic ya devuelve el string completo y guarda el avance.
             response_content = handle_phase_logic(user_prompt, user_area)
             
-            # 4. Añadir respuesta del asistente al historial y re-ejecutar
-            st.session_state.messages.append({"role": "assistant", "content": response_content})
+            # 3.3 Añadir respuesta del asistente con streaming simulado
+            with st.chat_message("assistant"):
+                # Generamos el efecto de tecleo aquí
+                stream_generator = (word + " " for word in response_content.split())
+                full_response_streamed = st.write_stream(stream_generator)
+
+            # 3.4 Guardar la respuesta completa (ya streameada) en el historial
+            st.session_state.messages.append({"role": "assistant", "content": full_response_content})
+            
             st.rerun()
 
     else:
