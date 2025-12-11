@@ -250,7 +250,7 @@ def load_area_context(user_area):
     else:
         context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades no encontrado."
     
-    # El campo 'atribuciones_resumen' contendrá el texto combinado de todas las fuentes
+    # El campo 'atribuciones_resumen' contendrá el texto combinado de todas las fuentes para el prompt
     context["atribuciones_resumen"] = f"**Reglamento Interior:** {context['reglamento_resumen']}\n**Ley Orgánica:** {context['ley_organica_resumen']}"
 
 
@@ -284,6 +284,7 @@ def get_llm_response(system_prompt: str, user_query: str):
     # Documentos personalizados
     if 'custom_docs_content' in st.session_state:
         for doc_name, doc_content in st.session_state['custom_docs_content'].items():
+            # También limitamos el tamaño de los documentos personalizados
             rag_context += f"\n\n--- CONTEXTO RAG (DOCUMENTO PERSONALIZADO: {doc_name}) ---\n{doc_content[:RAG_CHUNK_SIZE]}"
 
 
@@ -375,12 +376,14 @@ def save_pat_progress(user_area, pat_data):
     data_to_download = pat_json_data.encode('utf-8')
     
     # 2. Renderizar el botón de descarga en el sidebar
+    # **FIX DUPLICATE ID:** Añadimos key explícita
     st.sidebar.download_button(
         label="⬇️ Descargar Avance Completo (.json)",
         data=data_to_download,
         file_name=file_name,
         mime='application/json',
-        help="Guarda tu progreso (incluyendo historial de chat y fase actual)."
+        help="Guarda tu progreso (incluyendo historial de chat y fase actual).",
+        key="json_download_button" 
     )
     
     # 3. Actualizar estado (simulación de guardado exitoso)
@@ -433,6 +436,7 @@ def load_pat_progress(user_area):
     """
     
     st.sidebar.markdown("---")
+    # **FIX DUPLICATE ID:** El uploader ya tiene una clave (pat_file_uploader), la mantenemos.
     uploaded_file = st.sidebar.file_uploader(
         "⬆️ Cargar Avance de PAT (.json)",
         type=['json'],
@@ -731,10 +735,11 @@ def chat_view(user_name, user_area):
             st.session_state['custom_docs_content'] = {}
         
         # Generar el mensaje de bienvenida completo SÓLO si la conversación es nueva
-        if not st.session_state.messages or st.session_state.current_phase == 'inicio':
+        # FIX DE FLUJO: Se elimina la condición 'or st.session_state.current_phase == 'inicio'' para que el flujo solo corra una vez si hay mensajes.
+        if not st.session_state.messages:
             
             if st.session_state.pat_data.get('problema'):
-                 # Mensaje para cargar avance (se mantiene)
+                 # Esto solo se ejecuta si se CARGÓ UN JSON CON AVANCE y no había mensajes
                  next_phase_text = st.session_state.current_phase.replace('_', ' ')
                  initial_message = f"""
                  ¡Bienvenido de nuevo, **{user_name}**! Hemos cargado tu avance.
@@ -769,7 +774,7 @@ def chat_view(user_name, user_area):
                  st.session_state.messages.append({"role": "assistant", "content": full_response_content})
                  st.session_state.current_phase = 'Diagnostico_Problema_Definicion'
                  
-                 # FIX CRÍTICO: Forzar el RERUN para que el chat_input aparezca.
+                 # FIX CRÍTICO DE FLUJO: Forzar el RERUN para que el chat_input aparezca.
                  st.rerun() 
     
     # -----------------------------------------------------------------
@@ -784,17 +789,20 @@ def chat_view(user_name, user_area):
     # Botón de Descarga PDF (Artefacto legible)
     if st.session_state.messages:
         pdf_bytes = generate_pdf_conversation(st.session_state.messages, user_area)
+        # **FIX DUPLICATE ID:** Añadimos key explícita
         st.sidebar.download_button(
             label="📄 Exportar Conversación a PDF",
             data=pdf_bytes,
             file_name=f"conversacion_progob_{user_area}.pdf",
             mime='application/pdf',
-            help="Descarga una transcripción de la conversación actual."
+            help="Descarga una transcripción de la conversación actual.",
+            key="pdf_export_button" 
         )
         
     st.sidebar.markdown("---")
 
     # UPLOADER DE DOCUMENTOS PERSONALIZADOS (Se mantiene)
+    # **FIX DUPLICATE ID:** El uploader ya tiene una clave (custom_doc_uploader), la mantenemos.
     uploaded_custom_file = st.sidebar.file_uploader(
         "📂 Subir Documento Personalizado (PDF/TXT)",
         type=['pdf', 'txt'],
@@ -842,8 +850,6 @@ def chat_view(user_name, user_area):
 
     # --- 2. Mostrar Historial del Chat ---
     # Este loop muestra el historial y es crucial
-    # Se debe omitir el mensaje inicial si ya fue streameado en la parte superior.
-    # El if not st.session_state.messages ya maneja la lógica para evitar doble render
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -928,10 +934,12 @@ def main():
     else:
         st.sidebar.title("Bienvenido al Asesor PbR/MML")
         st.sidebar.markdown("---")
+        # **FIX DUPLICATE ID:** Añadimos key explícita para los widgets de login
         username = st.sidebar.text_input("Usuario (Correo)", key="login_user")
         password = st.sidebar.text_input("Contraseña", type="password", key="login_pass")
         
-        if st.sidebar.button("🔐 Ingresar"):
+        # **FIX DUPLICATE ID:** Añadimos key explícita para el botón de login
+        if st.sidebar.button("🔐 Ingresar", key="login_button"):
             if df_users.empty:
                 st.sidebar.error("Error de carga. El listado de usuarios está vacío. Verifique el archivo users.xlsx o la sección [users] en secrets.toml.")
             else:
