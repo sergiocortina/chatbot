@@ -9,7 +9,7 @@ import time
 from fpdf import FPDF 
 
 # Límite de caracteres para los documentos grandes en el RAG (para no exceder el límite de tokens)
-RAG_CHUNK_SIZE = 8000 
+RAG_CHUNK_SIZE = 16000 
 
 try:
     from unidecode import unidecode 
@@ -38,6 +38,10 @@ GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf")
 GDM_FILE = os.path.join(DOCS_DIR, "Cuaderno de trabajo GDM 2025-2027.pdf")
 ODS_FILE = os.path.join(DOCS_DIR, "Indicadores por Objetivo y Meta de los Objetivos de Desarrollo Sostenible.pdf")
 MANUAL_INDICADORES_FILE = os.path.join(DOCS_DIR, "Manual_de_indicadores_para_municipios 20250415.pdf")
+
+# NUEVO REQUISITO: LEY ORGÁNICA
+LEY_ORGANICA_FILE = os.path.join(DOCS_DIR, "ley organica.pdf")
+
 
 # CLAVE API: Se leerá de st.secrets["deepseek_api_key"]
 
@@ -144,7 +148,7 @@ def extract_text_from_pdf(pdf_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text() or ""
-        return text # Devolvemos el texto completo para la búsqueda heurística
+        return text # Devolvemos el texto completo
     except Exception as e:
         return f"ERROR al leer el PDF: {e}"
 
@@ -152,66 +156,63 @@ def extract_text_from_pdf(pdf_path):
 def load_area_context(user_area):
     """
     Carga el contexto específico del área del usuario, leyendo PDF y CSV (RAG).
-    Ajustado para cargar múltiples documentos y generar resúmenes legibles.
+    Ajustado para cargar Ley Orgánica y desplegar todas las atribuciones/actividades.
     """
     context = {
-        "atribuciones": "Contexto no cargado.", 
-        "atribuciones_resumen": "No disponible.",
-        "actividades_previas": "No disponibles.", 
-        "actividades_resumen": "No disponibles.",
-        "guia_metodologica": "Guía no cargada.",
-        "guia_resumen": "No disponible.",
-        # Nuevas claves de contexto (se guardan para la bienvenida y RAG)
+        "atribuciones": "", "atribuciones_resumen": "No disponible.",
+        "reglamento_content": "", "reglamento_resumen": "No disponible.",
+        "ley_organica_content": "", "ley_organica_resumen": "No disponible.",
+        "actividades_previas": "", "actividades_resumen": "No disponibles.", 
+        "guia_metodologica": "", "guia_resumen": "No disponible.",
         "ods_content": "", "ods_resumen": "No cargado.",
         "gdm_content": "", "gdm_resumen": "No cargado.",
         "manual_ind_content": "", "manual_ind_resumen": "No cargado.",
     }
-
-    # --- 1. CARGA DE ATRIBUCIONES (REGLAMENTO PDF) ---
-    full_reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
     
-    if "ERROR" in full_reglamento_text:
-        context["atribuciones"] = f"ADVERTENCIA (Reglamento): {full_reglamento_text}"
-        context["atribuciones_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({full_reglamento_text})"
+    # Clave de búsqueda (normalizada)
+    search_key = user_area.strip().upper()
+
+    # --- 1. CARGA DE LEY ORGÁNICA ---
+    full_ley_organica_text = extract_text_from_pdf(LEY_ORGANICA_FILE)
+    if "ERROR" not in full_ley_organica_text:
+        st.session_state['ley_organica_content'] = full_ley_organica_text[:RAG_CHUNK_SIZE]
+        context["ley_organica_resumen"] = f"Ley Orgánica Municipal cargada. Se usará para validar las facultades generales."
     else:
-        context["atribuciones"] = full_reglamento_text
-        # Limitamos el texto que se inyecta en el RAG para que no sature
-        st.session_state['reglamento_content'] = full_reglamento_text[:RAG_CHUNK_SIZE]
-        
-        # Generamos resumen para la bienvenida
-        search_key = user_area.strip().upper()
-        match = re.search(r'(TÍTULO|CAPÍTULO|ARTÍCULO)\s+.*' + re.escape(search_key) + r'.*?(ARTÍCULO|CAPÍTULO|TÍTULO|REFORMADO)', full_reglamento_text, re.DOTALL | re.IGNORECASE)
-        
-        if match:
-             fragment = match.group(0)
-             context["atribuciones_resumen"] = f"Fragmento Clave encontrado (Art. o Cap.): {fragment[:250].strip()}..."
-        else:
-             context["atribuciones_resumen"] = f"Reglamento Interior cargado. El asesor lo usará para validar su competencia legal y alineación a la Ley Orgánica."
-        
-    # --- 2. CARGA DE GUÍA METODOLÓGICA (PDF) ---
-    full_guia_text = extract_text_from_pdf(GUIDE_FILE)
-    if "ERROR" not in full_guia_text:
-        context["guia_metodologica"] = full_guia_text
-        context["guia_resumen"] = f"Guía Metodológica de PbR/MML cargada."
-        st.session_state['guia_content'] = full_guia_text[:RAG_CHUNK_SIZE]
+        context["ley_organica_resumen"] = f"ADVERTENCIA: Ley Orgánica no encontrada o con error. ({full_ley_organica_text})"
+
+
+    # --- 2. CARGA DE REGLAMENTO INTERIOR ---
+    full_reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
+    if "ERROR" not in full_reglamento_text:
+        context["reglamento_content"] = full_reglamento_text[:RAG_CHUNK_SIZE]
+        context["reglamento_resumen"] = f"Reglamento Interior cargado. El asesor buscará atribuciones específicas para {user_area}."
+        st.session_state['reglamento_content'] = context["reglamento_content"]
+    else:
+        context["reglamento_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({full_reglamento_text})"
+    
+    # Combinamos para la inyección RAG del prompt inicial si es necesario
+    context["atribuciones"] = (
+        f"--- Atribuciones Ley Orgánica ---\n{full_ley_organica_text}" + 
+        f"\n\n--- Atribuciones Reglamento Interior ---\n{full_reglamento_text}"
+    )
 
     # --- 3. CARGA DE DOCUMENTOS ESTRATÉGICOS (RAG) ---
     docs_to_load = {
         "ods": (ODS_FILE, "Objetivos de Desarrollo Sostenible (ODS)"),
-        "gdm": (GDM_FILE, "Cuaderno de Trabajo Guía Desempeño Municipal (GDM)"),
-        "manual_ind": (MANUAL_INDICADORES_FILE, "Manual de Indicadores para Municipios")
+        "gdm": (GDM_FILE, "Guía Desempeño Municipal (GDM)"),
+        "manual_ind": (MANUAL_INDICADORES_FILE, "Manual de Indicadores")
     }
     
     for key, (path, name) in docs_to_load.items():
         full_content = extract_text_from_pdf(path)
         if "ERROR" not in full_content:
-            context[f"{key}_content"] = full_content
+            context[f"{key}_content"] = full_content[:RAG_CHUNK_SIZE]
             context[f"{key}_resumen"] = f"Documento de {name} cargado ({len(full_content)} caracteres)."
-            st.session_state[f"{key}_content"] = full_content[:RAG_CHUNK_SIZE] # Aplicamos el límite RAG
+            st.session_state[f"{key}_content"] = context[f"{key}_content"] # Aplicamos el límite RAG
         else:
              context[f"{key}_resumen"] = f"ADVERTENCIA: {name} no encontrado o con error."
 
-    # --- 4. CARGA DE ACTIVIDADES PREVIAS (CSV) ---
+    # --- 4. CARGA Y LISTADO EXHAUSTIVO DE ACTIVIDADES PREVIAS (CSV) ---
     if os.path.exists(ACTIVIDADES_FILE):
         try:
             df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
@@ -231,12 +232,13 @@ def load_area_context(user_area):
                 
                 if not filtered_df.empty:
                     actividades_list = filtered_df['actividad'].tolist()
-                    context["actividades_previas"] = "\n* " + "\n* ".join(actividades_list)
-                    st.session_state['actividades_content'] = context["actividades_previas"] # Completo para RAG
                     
-                    # Resumen para la bienvenida
-                    top_activities = "\n".join([f"* {a}" for a in actividades_list]) # Listamos TODAS para el inicio
-                    context["actividades_resumen"] = f"Se encontraron **{len(actividades_list)} actividades** previas. Listado Completo:\n{top_activities}"
+                    # LISTADO COMPLETO DE ACTIVIDADES (como string) para el prompt inicial y RAG
+                    actividades_full_text = "\n".join([f"* {a}" for a in actividades_list])
+                    context["actividades_previas"] = actividades_full_text
+                    st.session_state['actividades_content'] = actividades_full_text
+                    
+                    context["actividades_resumen"] = f"Se encontraron **{len(actividades_list)} actividades** previas. Listado Completo:\n{actividades_full_text}"
 
                 else:
                     context["actividades_resumen"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}'."
@@ -247,6 +249,9 @@ def load_area_context(user_area):
             context["actividades_resumen"] = f"Error al procesar el archivo de actividades: {e}"
     else:
         context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades no encontrado."
+    
+    # El campo 'atribuciones_resumen' contendrá el texto combinado de todas las fuentes
+    context["atribuciones_resumen"] = f"**Reglamento Interior:** {context['reglamento_resumen']}\n**Ley Orgánica:** {context['ley_organica_resumen']}"
 
 
     return context
@@ -265,11 +270,13 @@ def get_llm_response(system_prompt: str, user_query: str):
     
     # --- INYECCIÓN RAG CRÍTICA (Se mantiene la inyección de los chunks limitados) ---
     rag_context = ""
+    # Documentos base
     if 'reglamento_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (REGLAMENTO INTERIOR) ---\n{st.session_state['reglamento_content']}"
+    if 'ley_organica_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (LEY ORGANICA) ---\n{st.session_state['ley_organica_content']}"
     if 'guia_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GUÍA METODOLÓGICA) ---\n{st.session_state['guia_content']}"
     if 'actividades_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ACTIVIDADES PREVIAS DEL ÁREA) ---\n{st.session_state['actividades_content']}"
     
-    # Nuevos documentos RAG (ya limitados en load_area_context)
+    # Documentos de alineación estratégica
     if 'ods_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ODS) ---\n{st.session_state['ods_content']}"
     if 'gdm_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GDM) ---\n{st.session_state['gdm_content']}"
     if 'manual_ind_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (MANUAL INDICADORES) ---\n{st.session_state['manual_ind_content']}"
@@ -277,7 +284,6 @@ def get_llm_response(system_prompt: str, user_query: str):
     # Documentos personalizados
     if 'custom_docs_content' in st.session_state:
         for doc_name, doc_content in st.session_state['custom_docs_content'].items():
-            # También limitamos el tamaño de los documentos personalizados
             rag_context += f"\n\n--- CONTEXTO RAG (DOCUMENTO PERSONALIZADO: {doc_name}) ---\n{doc_content[:RAG_CHUNK_SIZE]}"
 
 
@@ -300,18 +306,21 @@ def get_llm_response(system_prompt: str, user_query: str):
         "model": "deepseek-chat", 
         "messages": messages,
         "temperature": 0.3, 
-        "max_tokens": 4000 # Mantener un límite razonable para la respuesta
+        "max_tokens": 4000 
     }
     
     # Usamos la conexión síncrona, pero con manejo de errores más específico.
     try:
         response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
         
-        # Manejo específico del error 400
+        # Manejo específico del error 400 (Bad Request) y límites de tokens
         if response.status_code == 400:
              try:
                  error_data = response.json()
                  error_message = error_data.get('error', {}).get('message', 'Solicitud incorrecta (400 Bad Request).')
+                 # Si el error es de límite de contexto, lo reportamos claramente
+                 if "context length" in error_message:
+                    error_message = "❌ Límite de tokens excedido. Por favor, reinicia la conversación (INICIAR DE NUEVO) o revisa los documentos cargados. " + error_message
                  return iter([f"❌ Error en la comunicación con la API. Detalle: {error_message}"])
              except:
                  return iter([f"❌ Error en la comunicación con la API. Detalle: 400 Client Error: Bad Request."])
@@ -380,7 +389,7 @@ def save_pat_progress(user_area, pat_data):
 def generate_pdf_conversation(messages, user_area):
     """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
     
-    # FIX FPDF: Eliminamos argumentos conflictivos para usar la inicialización más simple
+    # FIX FPDF: Inicialización simple sin argumentos conflictivos.
     pdf = FPDF(unit="mm", format="A4", orientation="P") 
     
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -499,7 +508,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         
         Como Enlace Senior de Progob: 
         1.  **Explica didácticamente** qué es el Problema Central y su estructura (población + situación no deseada).
-        2.  Usando el Reglamento Interior (RAG), **valida brevemente** si el problema está dentro de las atribuciones de la UR.
+        2.  Usando el Reglamento Interior y la Ley Orgánica (RAG), **valida brevemente** si el problema está dentro de las atribuciones de la UR.
         3.  Usando la Guía Metodológica (RAG), evalúa el enunciado. Si la redacción del usuario es correcta, **confirma que es una redacción válida y ajusta la sintaxis si es necesario**. Si el enunciado incumple reglas (es ausencia de servicio, o incluye soluciones), propón una redacción ajustada (Opción A, B).
         4.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. **IMPORTANTE: El Problema Central definitivo DEBE ser copiado y pegado o redactado por el usuario en su próxima respuesta.**
         5.  Instrucción de Respuesta: Responde con la redacción completa elegida o propuesta. **NO AVANCES A CAUSAS/EFECTOS.**
@@ -523,7 +532,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         Como Enlace Senior de Progob: 
         1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
         2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
-        3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
+        3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). **Asegúrate de generar los Efectos Directos e Indirectos correspondientes al problema central** y preséntalos en una tabla estructurada y clara.
         4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
         response_generator = get_llm_response(SYSTEM_PROMPT, query_llm)
@@ -743,10 +752,10 @@ def chat_view(user_name, user_area):
                  Genera el mensaje de diagnóstico inicial para la Unidad Responsable '{user_area}'. 
                  Debes cumplir **estrictamente** los siguientes puntos usando el RAG:
                  1.  Identifica y explica el ODS (Objetivo de Desarrollo Sostenible) principal al que debe contribuir la UR, basándote en su área y documentos cargados (ODS).
-                 2.  Explica las atribuciones de la UR, citando el Reglamento Interior y la Ley Orgánica (simulada por RAG).
+                 2.  Explica las atribuciones de la UR, citando el Reglamento Interior y la Ley Orgánica (contextos RAG).
                  3.  Presenta el LISTADO COMPLETO de sus actividades previas (del CSV).
                  4.  Identifica y lista 3 indicadores aplicables del GDM y 3 del Manual de Indicadores para Municipios que debe considerar la UR.
-                 5.  Explica brevemente qué es la Metodología de Marco Lógico (MML), que su primer paso es el **Problema Central**, qué es el Problema Central y su estructura, y el por qué usaremos **microfases** (validación obligatoria del usuario).
+                 5.  Explica brevemente qué es la Metodología de Marco Lógico (MML), que su primer paso es el **Problema Central**, qué es el Problema Central y su estructura, y el por qué usaremos **microfases** (validación obligatoria del usuario). Finalmente, **propón 3 opciones de Problema Central** basados en el análisis de atribuciones y actividades (Opciones A, B, C).
                  """
                  # Ejecutamos el LLM para obtener el generador de respuesta
                  response_generator = get_llm_response(SYSTEM_PROMPT, initial_query)
@@ -833,6 +842,8 @@ def chat_view(user_name, user_area):
 
     # --- 2. Mostrar Historial del Chat ---
     # Este loop muestra el historial y es crucial
+    # Se debe omitir el mensaje inicial si ya fue streameado en la parte superior.
+    # El if not st.session_state.messages ya maneja la lógica para evitar doble render
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
