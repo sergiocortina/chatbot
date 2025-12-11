@@ -39,7 +39,7 @@ GDM_FILE = os.path.join(DOCS_DIR, "Cuaderno de trabajo GDM 2025-2027.pdf")
 ODS_FILE = os.path.join(DOCS_DIR, "Indicadores por Objetivo y Meta de los Objetivos de Desarrollo Sostenible.pdf")
 MANUAL_INDICADORES_FILE = os.path.join(DOCS_DIR, "Manual_de_indicadores_para_municipios 20250415.pdf")
 
-# NUEVO REQUISITO: LEY ORGÁNICA
+# REQUISITO: LEY ORGÁNICA
 LEY_ORGANICA_FILE = os.path.join(DOCS_DIR, "ley organica.pdf")
 
 
@@ -359,35 +359,12 @@ def get_pat_file_name(user_area):
 
 def save_pat_progress(user_area, pat_data):
     """
-    PERSISTENCIA LOCAL: Genera el botón de descarga del archivo JSON. 
-    INCLUYE TODO EL ESTADO DE LA SESIÓN (MENSAJES Y DATOS METODOLÓGICOS).
+    ***ESTA FUNCIÓN YA NO SE USA PARA GUARDAR EL ESTADO METODOLÓGICO.***
+    Solo se usa para la lógica de visualización del botón de PDF/JSON si existiera.
+    Se mantiene en desuso por el momento ya que eliminamos el JSON.
     """
-    file_name = get_pat_file_name(user_area)
-    
-    # Preparamos el estado completo a guardar
-    full_state = {
-        "pat_data": pat_data,
-        "messages": st.session_state.get('messages', []),
-        "current_phase": st.session_state.get('current_phase', 'inicio')
-    }
-    
-    # 1. Convertir datos a JSON y luego a bytes
-    pat_json_data = json.dumps(full_state, indent=4, ensure_ascii=False)
-    data_to_download = pat_json_data.encode('utf-8')
-    
-    # 2. Renderizar el botón de descarga en el sidebar
-    # **FIX DUPLICATE ID:** Añadimos key explícita
-    st.sidebar.download_button(
-        label="⬇️ Descargar Avance Completo (.json)",
-        data=data_to_download,
-        file_name=file_name,
-        mime='application/json',
-        help="Guarda tu progreso (incluyendo historial de chat y fase actual).",
-        key="json_download_button" 
-    )
-    
-    # 3. Actualizar estado (simulación de guardado exitoso)
-    st.session_state['drive_status'] = f"✅ Avance listo para descargar: {file_name}"
+    # Esta función se elimina ya que el JSON se suprime
+    pass
     
 def generate_pdf_conversation(messages, user_area):
     """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
@@ -431,17 +408,18 @@ def generate_pdf_conversation(messages, user_area):
 
 def load_pat_progress(user_area):
     """
-    PERSISTENCIA LOCAL: Muestra el uploader y carga el JSON si se proporciona.
-    RECUPERA EL AVANCE METODOLÓGICO Y EL HISTORIAL DE MENSAJES.
+    ***ESTA FUNCIÓN YA NO SE USA PARA CARGAR/GUARDAR ESTADO METODOLÓGICO (JSON).***
+    Ahora solo maneja el uploader de la conversación PDF/JSON para restaurar el historial.
+    Se ha simplificado para solo manejar el uploader.
     """
     
     st.sidebar.markdown("---")
-    # **FIX DUPLICATE ID:** El uploader ya tiene una clave (pat_file_uploader), la mantenemos.
+    # Este uploader ahora permite cargar un archivo JSON o un TXT que contenga la conversación para restaurar el historial.
     uploaded_file = st.sidebar.file_uploader(
-        "⬆️ Cargar Avance de PAT (.json)",
-        type=['json'],
+        "⬆️ Cargar Conversación Previa (.json / .txt)",
+        type=['json', 'txt'],
         key="pat_file_uploader",
-        help="Sube el archivo JSON de avance guardado previamente."
+        help="Sube el archivo JSON de avance completo o un archivo .txt para restaurar el historial de chat."
     )
     
     # Definición del estado inicial vacío
@@ -451,35 +429,45 @@ def load_pat_progress(user_area):
         "componentes_final": None, "componentes_borrador": None,
         "componentes_actividades": []
     }
+    
+    messages = []
+    current_phase = 'inicio'
 
     if uploaded_file is not None:
         try:
             bytes_data = uploaded_file.getvalue()
-            full_state = json.loads(bytes_data.decode('utf-8'))
+            content = bytes_data.decode('utf-8')
             
-            # Validar y cargar el avance metodológico
-            pat_data = full_state.get('pat_data', empty_state)
-            
-            # Cargar el historial de mensajes
-            messages = full_state.get('messages', [])
-            
-            if not pat_data or pat_data.get('problema') is None and not messages:
-                 st.sidebar.error("❌ El archivo JSON está vacío o es inválido.")
-                 return empty_state, []
+            if uploaded_file.type == 'application/json':
+                 # Intenta cargar un estado completo (JSON)
+                 full_state = json.loads(content)
+                 pat_data = full_state.get('pat_data', empty_state)
+                 messages = full_state.get('messages', [])
+                 current_phase = full_state.get('current_phase', 'inicio')
                  
-            # Si la carga es exitosa, restauramos los mensajes y la fase actual en la sesión
-            st.session_state['messages'] = messages
-            st.session_state['current_phase'] = full_state.get('current_phase', 'inicio')
+                 # Si la carga es exitosa, restauramos los mensajes y la fase actual
+                 st.session_state['messages'] = messages
+                 st.session_state['current_phase'] = current_phase
+                 st.session_state['pat_data'] = pat_data
+                 
+                 st.session_state['drive_status'] = f"✅ Avance '{uploaded_file.name}' cargado exitosamente."
+                 st.rerun() # Forzamos la recarga con el nuevo estado
             
-            st.session_state['drive_status'] = f"✅ Avance '{uploaded_file.name}' cargado exitosamente."
-            return pat_data, messages
+            else: # Asume TXT o formato simple: restaurar solo el historial de mensajes
+                # Esto es un fallback, pero no restaura la lógica de fases.
+                st.sidebar.warning("Solo se cargó el historial de texto. La lógica metodológica (fases) debe reiniciarse.")
+                st.session_state['messages'] = [{"role": "assistant", "content": "Historial restaurado desde TXT. Por favor, define el siguiente paso metodológico."}, {"role": "user", "content": content}]
+                st.session_state['pat_data'] = empty_state
+                st.session_state['current_phase'] = 'Diagnostico_Problema_Definicion' # Reiniciamos la fase.
+                st.rerun()
+
             
         except Exception as e:
             st.sidebar.error(f"❌ Error al cargar el archivo: {e}")
-            return empty_state, []
+            
     
     st.session_state['drive_status'] = "⚠️ Persistencia: Esperando que cargue un avance o inicie un nuevo PAT."
-    # Si no hay archivo subido, retorna el estado vacío y una lista de mensajes vacía
+    # Retorna el estado inicial, ya que el estado cargado se maneja directamente con st.session_state
     return empty_state, []
 
 
@@ -697,7 +685,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
     response_content = "".join(list(response_generator))
 
     # 3. Guardar avance después de cada paso lógico y actualizar el estado de descarga
-    save_pat_progress(user_area, st.session_state.pat_data)
+    # Ya no llamamos a save_pat_progress aquí.
     
     return response_content
 
@@ -735,11 +723,10 @@ def chat_view(user_name, user_area):
             st.session_state['custom_docs_content'] = {}
         
         # Generar el mensaje de bienvenida completo SÓLO si la conversación es nueva
-        # FIX DE FLUJO: Se elimina la condición 'or st.session_state.current_phase == 'inicio'' para que el flujo solo corra una vez si hay mensajes.
         if not st.session_state.messages:
             
             if st.session_state.pat_data.get('problema'):
-                 # Esto solo se ejecuta si se CARGÓ UN JSON CON AVANCE y no había mensajes
+                 # Mensaje para cargar avance (se mantiene)
                  next_phase_text = st.session_state.current_phase.replace('_', ' ')
                  initial_message = f"""
                  ¡Bienvenido de nuevo, **{user_name}**! Hemos cargado tu avance.
@@ -782,10 +769,7 @@ def chat_view(user_name, user_area):
     # -----------------------------------------------------------------
     
     st.sidebar.markdown("---")
-    # Botón de Descarga JSON (Persistencia de la sesión)
-    if st.session_state.pat_data.get('problema') is not None or st.session_state.pat_data.get('proposito') is not None:
-         save_pat_progress(user_area, st.session_state.pat_data)
-
+    
     # Botón de Descarga PDF (Artefacto legible)
     if st.session_state.messages:
         pdf_bytes = generate_pdf_conversation(st.session_state.messages, user_area)
