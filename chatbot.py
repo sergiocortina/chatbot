@@ -9,7 +9,7 @@ import time
 from fpdf import FPDF 
 
 # Límite de caracteres para los documentos grandes en el RAG (para no exceder el límite de tokens)
-RAG_CHUNK_SIZE = 8000 # Reducido de 15000 para dejar espacio al historial y a la respuesta.
+RAG_CHUNK_SIZE = 8000 
 
 try:
     from unidecode import unidecode 
@@ -144,7 +144,7 @@ def extract_text_from_pdf(pdf_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text() or ""
-        return text[:RAG_CHUNK_SIZE] # Limitamos el tamaño del chunk para la carga inicial
+        return text # Devolvemos el texto completo para la búsqueda heurística
     except Exception as e:
         return f"ERROR al leer el PDF: {e}"
 
@@ -168,7 +168,6 @@ def load_area_context(user_area):
     }
 
     # --- 1. CARGA DE ATRIBUCIONES (REGLAMENTO PDF) ---
-    # Nota: Aquí usamos el texto completo para el RAG para la búsqueda heurística.
     full_reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
     
     if "ERROR" in full_reglamento_text:
@@ -236,7 +235,7 @@ def load_area_context(user_area):
                     st.session_state['actividades_content'] = context["actividades_previas"] # Completo para RAG
                     
                     # Resumen para la bienvenida
-                    top_activities = "\n".join([f"* {a}" for a in actividades_list])
+                    top_activities = "\n".join([f"* {a}" for a in actividades_list]) # Listamos TODAS para el inicio
                     context["actividades_resumen"] = f"Se encontraron **{len(actividades_list)} actividades** previas. Listado Completo:\n{top_activities}"
 
                 else:
@@ -381,7 +380,7 @@ def save_pat_progress(user_area, pat_data):
 def generate_pdf_conversation(messages, user_area):
     """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
     
-    # FIX FPDF: Eliminamos 'font_directory=None' y 'encoding='utf-8'' para evitar el TypeError
+    # FIX FPDF: Eliminamos argumentos conflictivos para usar la inicialización más simple
     pdf = FPDF(unit="mm", format="A4", orientation="P") 
     
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -405,7 +404,6 @@ def generate_pdf_conversation(messages, user_area):
         
         pdf.set_font("Arial", "", 10)
         
-        # Limpiamos el contenido de markdown y caracteres que fpdf no maneja bien
         content_clean = content.replace('>', '').replace('*', '').replace('•', '-')
         
         # Usamos .encode('latin1', 'replace') para manejar cualquier caracter que FPDF no pueda, 
@@ -524,7 +522,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         
         Como Enlace Senior de Progob: 
         1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
-        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas y la diferencia entre Causas Directas e Indirectas.
+        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
         3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
         4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
@@ -710,6 +708,7 @@ def chat_view(user_name, user_area):
         if st.session_state.pat_data.get('proposito'):
             st.session_state.current_phase = 'Componentes_Definicion'
         elif st.session_state.pat_data.get('problema'):
+            # Si solo hay problema, lo más probable es que tenga que validar el árbol o definir el propósito.
             st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
         else:
             st.session_state.current_phase = 'inicio'
@@ -760,10 +759,9 @@ def chat_view(user_name, user_area):
                  # Guardamos la respuesta COMPLETA (ya streameada) en el historial de mensajes
                  st.session_state.messages.append({"role": "assistant", "content": full_response_content})
                  st.session_state.current_phase = 'Diagnostico_Problema_Definicion'
-                 # No hacemos rerun aquí, ya que la respuesta se escribió con st.write_stream
                  
-                 # Salimos de la función para esperar la entrada del usuario
-                 return 
+                 # FIX CRÍTICO: Forzar el RERUN para que el chat_input aparezca.
+                 st.rerun() 
     
     # -----------------------------------------------------------------
     # SIDEBAR: BOTONES DE PERSISTENCIA Y CARGA DE DOCUMENTOS
