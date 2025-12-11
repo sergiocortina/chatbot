@@ -5,12 +5,11 @@ import json
 import io
 import requests 
 import re 
+from fpdf import FPDF # Nueva librería para generar PDFs
+
 try:
-    # Usamos try/except para la librería unidecode en caso de que la instalación en el entorno falle, 
-    # aunque es necesaria para la normalización del área de búsqueda en el RAG.
     from unidecode import unidecode 
 except ImportError:
-    # Si falla, definimos una función dummy que no normaliza (pero puede fallar en la búsqueda RAG)
     def unidecode(text):
         return text
     st.warning("Advertencia: La librería 'unidecode' no está disponible. La búsqueda de actividades por área podría ser menos precisa.")
@@ -29,7 +28,12 @@ USERS_FILE_NAME = "users.xlsx"
 DOCS_DIR = "docs"
 ACTIVIDADES_FILE = os.path.join(DOCS_DIR, "Actividades por area.csv") 
 REGLAMENTO_FILE = os.path.join(DOCS_DIR, "REGLAMENTO-INTERIOR-DE-LA-ADMINISTRACION-PUBLICA-DEL-MUNICIPIO-DE-VERACRUZ.pdf") 
+
+# NUEVOS DOCUMENTOS DE ALINEAMIENTO ESTRATÉGICO
 GUIDE_FILE = os.path.join(DOCS_DIR, "Modulo7_PbR (IA).pdf") 
+GDM_FILE = os.path.join(DOCS_DIR, "Cuaderno de trabajo GDM 2025-2027.pdf")
+ODS_FILE = os.path.join(DOCS_DIR, "Indicadores por Objetivo y Meta de los Objetivos de Desarrollo Sostenible.pdf")
+MANUAL_INDICADORES_FILE = os.path.join(DOCS_DIR, "Manual_de_indicadores_para_municipios 20250415.pdf")
 
 # CLAVE API: Se leerá de st.secrets["deepseek_api_key"]
 
@@ -46,9 +50,10 @@ SYSTEM_PROMPT = """
 1.  **Micro-Fases y Validación:** La conversación se basa en micro-fases didácticas. **No permitas avanzar a la siguiente etapa de la MIR (Problema final, Propósito final, Componentes finales) hasta que el usuario haya validado o confirmado el enunciado propuesto o ajustado.**
 2.  **Validación Metodológica:** Cada respuesta que avance o valide un concepto debe incluir una explicación didáctica del concepto (ej. Lógica Vertical, RMAE-T) y, si es posible, opciones de redacción para que el usuario elija o proponga una propia.
 3.  **Contexto Específico (RAG):** Usa las atribuciones y actividades de la Unidad Responsable del usuario ({user_area_context}) para contextualizar las propuestas y validaciones.
-4.  **Formato:** Usa Markdown y Tablas para claridad y estructura.
-5.  **Lenguaje Didáctico:** Siempre que introduzcas un concepto nuevo (ej. Causa Directa, Indicador RMAE-T, Lógica Vertical), **proporciona una breve explicación didáctica y un ejemplo práctico relacionado con un servicio público**, asumiendo que el usuario no es experto en metodología.
-6.  **Lenguaje Progob:** Utiliza frases como "Consultando la base de conocimiento...", "Revisando el Reglamento Interior...", "Preguntando a Progob...", o "Según la Guía Técnica...". **Nunca menciones "Deepseek", "LLM" o "Modelo de Lenguaje".**
+4.  **Alineación Estratégica:** En cada fase, asegúrate de que las propuestas estén alineadas con la **Ley Orgánica**, los **ODS** y los indicadores del **GDM/Manual de Indicadores** cargados en el contexto (RAG).
+5.  **Formato:** Usa Markdown y Tablas para claridad y estructura.
+6.  **Lenguaje Didáctico:** Siempre que introduzcas un concepto nuevo (ej. Causa Directa, Indicador RMAE-T, Lógica Vertical), **proporciona una breve explicación didáctica y un ejemplo práctico relacionado con un servicio público**, asumiendo que el usuario no es experto en metodología.
+7.  **Lenguaje Progob:** Utiliza frases como "Consultando la base de conocimiento...", "Revisando el Reglamento Interior...", "Preguntando a Progob...", o "Según la Guía Técnica...". **Nunca menciones "Deepseek", "LLM" o "Modelo de Lenguaje".**
 """
 
 # --------------------------------------------------------------------------
@@ -57,6 +62,7 @@ SYSTEM_PROMPT = """
 
 def load_users():
     """Carga el listado de usuarios, priorizando users.xlsx o secrets.toml."""
+    # ... (Función load_users se mantiene igual) ...
     possible_names = [USERS_FILE_NAME, "users.csv", "usuarios.xlsx", "usuarios.csv"]
     found_file = None
     for name in possible_names:
@@ -110,6 +116,7 @@ def load_users():
 
 def authenticate(username, password, df_users):
     """Verifica credenciales y devuelve el rol, nombre y área del usuario."""
+    # ... (Función authenticate se mantiene igual) ...
     clean_username = username.strip().lower()
     user = df_users[(df_users['username'] == clean_username) & (df_users['password'] == password)]
     
@@ -141,7 +148,7 @@ def extract_text_from_pdf(pdf_path):
 def load_area_context(user_area):
     """
     Carga el contexto específico del área del usuario, leyendo PDF y CSV (RAG).
-    Ajustado para generar resúmenes legibles para el mensaje de bienvenida.
+    Ajustado para cargar múltiples documentos y generar resúmenes legibles.
     """
     context = {
         "atribuciones": "Contexto no cargado.", 
@@ -149,57 +156,62 @@ def load_area_context(user_area):
         "actividades_previas": "No disponibles.", 
         "actividades_resumen": "No disponibles.",
         "guia_metodologica": "Guía no cargada.",
-        "guia_resumen": "No disponible."
+        "guia_resumen": "No disponible.",
+        # Nuevas claves de contexto (se guardan para la bienvenida y RAG)
+        "ods_content": "", "ods_resumen": "No cargado.",
+        "gdm_content": "", "gdm_resumen": "No cargado.",
+        "manual_ind_content": "", "manual_ind_resumen": "No cargado.",
     }
 
     # --- 1. CARGA DE ATRIBUCIONES (REGLAMENTO PDF) ---
     reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
-    
     if "ERROR" in reglamento_text:
         context["atribuciones"] = f"ADVERTENCIA (Reglamento): {reglamento_text}"
         context["atribuciones_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({reglamento_text})"
     else:
         context["atribuciones"] = reglamento_text
-        # Intento simplificado para encontrar la sección de atribuciones de la UR
+        # Usamos una heurística para el resumen
         search_key = user_area.strip().upper()
-        # Busca un patrón típico de atribuciones (Artículos, Secciones, Títulos)
-        # Se usará un LLM o una búsqueda heurística más simple en un entorno real. Aquí usamos una heurística.
         match = re.search(r'(TÍTULO|CAPÍTULO|ARTÍCULO)\s+.*' + re.escape(search_key) + r'.*?(ARTÍCULO|CAPÍTULO|TÍTULO|REFORMADO)', reglamento_text, re.DOTALL | re.IGNORECASE)
-        
         if match:
-             # Si encuentra un fragmento específico, lo resume.
              fragment = match.group(0)
              context["atribuciones_resumen"] = f"Fragmento Clave encontrado (Art. o Cap.): {fragment[:250].strip()}..."
         else:
-             # Validación general si no encuentra un artículo específico.
-             context["atribuciones_resumen"] = f"Reglamento Interior cargado. El asesor lo usará para validar su competencia en el **Artículo 7 (Fines esenciales)**."
-        
+             context["atribuciones_resumen"] = f"Reglamento Interior cargado. El asesor lo usará para validar su competencia legal y alineación a la Ley Orgánica."
         st.session_state['reglamento_content'] = reglamento_text 
         
     # --- 2. CARGA DE GUÍA METODOLÓGICA (PDF) ---
     guia_text = extract_text_from_pdf(GUIDE_FILE)
-    if "ERROR" in guia_text:
-        context["guia_metodologica"] = f"ADVERTENCIA (Guía): {guia_text}"
-        context["guia_resumen"] = f"ADVERTENCIA: Error al cargar la Guía Metodológica. ({guia_text})"
-    else:
+    if "ERROR" not in guia_text:
         context["guia_metodologica"] = guia_text 
-        context["guia_resumen"] = f"Guía Metodológica de PbR/MML cargada ({len(guia_text)} caracteres). Contiene los prompts y reglas de sintaxis para la MIR."
+        context["guia_resumen"] = f"Guía Metodológica de PbR/MML cargada."
         st.session_state['guia_content'] = guia_text 
 
-    # --- 3. CARGA DE ACTIVIDADES PREVIAS (CSV) ---
+    # --- 3. CARGA DE DOCUMENTOS ESTRATÉGICOS (RAG) ---
+    docs_to_load = {
+        "ods": (ODS_FILE, "Objetivos de Desarrollo Sostenible (ODS)"),
+        "gdm": (GDM_FILE, "Cuaderno de Trabajo Guía Desempeño Municipal (GDM)"),
+        "manual_ind": (MANUAL_INDICADORES_FILE, "Manual de Indicadores para Municipios")
+    }
+    
+    for key, (path, name) in docs_to_load.items():
+        content = extract_text_from_pdf(path)
+        if "ERROR" not in content:
+            context[f"{key}_content"] = content
+            context[f"{key}_resumen"] = f"Documento de {name} cargado ({len(content)} caracteres)."
+            st.session_state[f"{key}_content"] = content
+        else:
+             context[f"{key}_resumen"] = f"ADVERTENCIA: {name} no encontrado o con error."
+
+    # --- 4. CARGA DE ACTIVIDADES PREVIAS (CSV) ---
     if os.path.exists(ACTIVIDADES_FILE):
         try:
-            try:
-                df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
-            except UnicodeDecodeError:
-                df_actividades = pd.read_csv(ACTIVIDADES_FILE, sep=';', encoding='latin1') 
-                
+            df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
+            # ... (Lógica de filtrado y resumen de actividades) ...
             df_actividades.columns = df_actividades.columns.str.lower()
             
             if 'area' in df_actividades.columns and 'actividad' in df_actividades.columns:
-                # Normalización del área para búsqueda sin acentos ni símbolos
                 clean_user_area_norm = unidecode(user_area.strip()).replace('.', '').upper()
-                
                 area_keys = [clean_user_area_norm]
                 if "SIPINNA" in clean_user_area_norm:
                      area_keys.append('SIPINNA')
@@ -211,29 +223,23 @@ def load_area_context(user_area):
                 ]
                 
                 if not filtered_df.empty:
-                    # Almacenamos el contenido completo para el RAG
                     actividades_list = filtered_df['actividad'].tolist()
                     context["actividades_previas"] = "\n* " + "\n* ".join(actividades_list)
-                    st.session_state['actividades_content'] = context["actividades_previas"]
+                    st.session_state['actividades_content'] = context["actividades_previas"] # Para RAG completo
 
-                    # Generamos el resumen para la bienvenida (solo las primeras 5 actividades)
-                    top_activities = "\n".join([f"* {a}" for a in actividades_list[:5]])
-                    remaining = len(actividades_list) - 5
-                    if remaining > 0:
-                        top_activities += f"\n* ... y {remaining} actividades más."
-                    
-                    context["actividades_resumen"] = f"Se encontraron **{len(actividades_list)} actividades** previas. Ejemplos:\n{top_activities}"
+                    # Resumen para la bienvenida
+                    top_activities = "\n".join([f"* {a}" for a in actividades_list]) # Listamos TODAS para el inicio
+                    context["actividades_resumen"] = f"Se encontraron **{len(actividades_list)} actividades** previas. Listado Completo:\n{top_activities}"
 
                 else:
-                    context["actividades_resumen"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}'. El LLM procederá sin esta referencia."
-
+                    context["actividades_resumen"] = f"ADVERTENCIA: No se encontraron actividades previas para la UR '{user_area}'."
             else:
                 context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades cargado, pero faltan columnas 'area' o 'actividad'."
 
         except Exception as e:
-            context["actividades_resumen"] = f"Error al procesar el archivo de actividades ({ACTIVIDADES_FILE}): {e}"
+            context["actividades_resumen"] = f"Error al procesar el archivo de actividades: {e}"
     else:
-        context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades no encontrado en la ruta: {ACTIVIDADES_FILE}. Verifique la carpeta 'docs/'."
+        context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades no encontrado."
 
 
     return context
@@ -250,17 +256,23 @@ def get_llm_response(system_prompt: str, user_query: str):
         st.error("🚨 ERROR: La clave 'deepseek_api_key' no se encuentra en `secrets.toml`.")
         return "❌ Conexión fallida. Por favor, verifica tu clave API."
     
-    # --- INYECCIÓN RAG CRÍTICA ---
+    # --- INYECCIÓN RAG CRÍTICA (Añadimos los nuevos contenidos) ---
     rag_context = ""
-    # Se inyectan los contenidos completos, no solo los resúmenes.
-    if 'reglamento_content' in st.session_state:
-        rag_context += f"\n\n--- CONTEXTO RAG (REGLAMENTO INTERIOR) ---\n{st.session_state['reglamento_content']}"
-    if 'guia_content' in st.session_state:
-        rag_context += f"\n\n--- CONTEXTO RAG (GUÍA METODOLÓGICA) ---\n{st.session_state['guia_content']}"
-    if 'actividades_content' in st.session_state:
-        rag_context += f"\n\n--- CONTEXTO RAG (ACTIVIDADES PREVIAS DEL ÁREA) ---\n{st.session_state['actividades_content']}"
+    if 'reglamento_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (REGLAMENTO INTERIOR) ---\n{st.session_state['reglamento_content']}"
+    if 'guia_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GUÍA METODOLÓGICA) ---\n{st.session_state['guia_content']}"
+    if 'actividades_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ACTIVIDADES PREVIAS DEL ÁREA) ---\n{st.session_state['actividades_content']}"
+    
+    # Nuevos documentos RAG
+    if 'ods_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ODS) ---\n{st.session_state['ods_content']}"
+    if 'gdm_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GDM) ---\n{st.session_state['gdm_content']}"
+    if 'manual_ind_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (MANUAL INDICADORES) ---\n{st.session_state['manual_ind_content']}"
+    
+    # Documentos personalizados
+    if 'custom_docs_content' in st.session_state:
+        for doc_name, doc_content in st.session_state['custom_docs_content'].items():
+            rag_context += f"\n\n--- CONTEXTO RAG (DOCUMENTO PERSONALIZADO: {doc_name}) ---\n{doc_content}"
 
-    # Reemplazamos el marcador de posición con el resumen de atribuciones para que el LLM se enfoque al inicio
+
     final_system_prompt = system_prompt.replace("{user_area_context}", st.session_state['area_context']['atribuciones_resumen'])
     final_system_prompt += rag_context
     # -----------------------------
@@ -310,37 +322,71 @@ def get_llm_response(system_prompt: str, user_query: str):
 
 def get_pat_file_name(user_area):
     """Genera el nombre de archivo para guardar el avance del PAT."""
-    # Aseguramos un nombre de archivo seguro
     clean_area = re.sub(r'[^\w\s-]', '', user_area.replace(' ', '_'))
     return f"avance_pat_{clean_area}.json"
 
 def save_pat_progress(user_area, pat_data):
     """
     PERSISTENCIA LOCAL: Genera el botón de descarga del archivo JSON. 
-    Esta función solo se encarga de dibujar el botón y actualizar el estado.
+    INCLUYE TODO EL ESTADO DE LA SESIÓN (MENSAJES Y DATOS METODOLÓGICOS).
     """
-    
     file_name = get_pat_file_name(user_area)
     
+    # Preparamos el estado completo a guardar
+    full_state = {
+        "pat_data": pat_data,
+        "messages": st.session_state.get('messages', []),
+        "current_phase": st.session_state.get('current_phase', 'inicio')
+    }
+    
     # 1. Convertir datos a JSON y luego a bytes
-    pat_json_data = json.dumps(pat_data, indent=4, ensure_ascii=False)
+    pat_json_data = json.dumps(full_state, indent=4, ensure_ascii=False)
     data_to_download = pat_json_data.encode('utf-8')
     
     # 2. Renderizar el botón de descarga en el sidebar
-    # st.sidebar.markdown("---") # Se mueve esta línea a chat_view para mejor control visual
     st.sidebar.download_button(
-        label="⬇️ Descargar Avance (.json)",
+        label="⬇️ Descargar Avance Completo (.json)",
         data=data_to_download,
         file_name=file_name,
         mime='application/json',
-        help="Guarda tu progreso para cargarlo en otra sesión."
+        help="Guarda tu progreso (incluyendo historial de chat y fase actual)."
     )
     
     # 3. Actualizar estado (simulación de guardado exitoso)
     st.session_state['drive_status'] = f"✅ Avance listo para descargar: {file_name}"
+    
+def generate_pdf_conversation(messages):
+    """Genera un PDF con la transcripción de la conversación."""
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Transcripción de la Asesoría Progob (MIR)", 0, 1, "C")
+    pdf.set_font("Arial", "", 10)
+    pdf.cell(0, 5, f"Fecha de Exportación: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}", 0, 1, "C")
+    pdf.ln(5)
+
+    for msg in messages:
+        role = msg["role"].upper()
+        content = msg["content"]
+        
+        pdf.set_font("Arial", "B", 10)
+        pdf.set_fill_color(200, 220, 255) if role == "ASSISTANT" else pdf.set_fill_color(240, 240, 240)
+        pdf.cell(0, 7, f"--- {role} ---", 0, 1, 'L', 1)
+        
+        pdf.set_font("Arial", "", 10)
+        # Reemplazar saltos de línea para que el multi_cell funcione bien
+        content_clean = content.replace('\n', ' ').replace('>', '').replace('*', '')
+        pdf.multi_cell(0, 5, content_clean)
+        pdf.ln(2)
+
+    return pdf.output(dest='S').encode('latin1') # Devuelve como bytes
 
 def load_pat_progress(user_area):
-    """PERSISTENCIA LOCAL: Muestra el uploader y carga el JSON si se proporciona."""
+    """
+    PERSISTENCIA LOCAL: Muestra el uploader y carga el JSON si se proporciona.
+    RECUPERA EL AVANCE METODOLÓGICO Y EL HISTORIAL DE MENSAJES.
+    """
     
     st.sidebar.markdown("---")
     uploaded_file = st.sidebar.file_uploader(
@@ -349,54 +395,44 @@ def load_pat_progress(user_area):
         key="pat_file_uploader",
         help="Sube el archivo JSON de avance guardado previamente."
     )
-
-    if uploaded_file is not None:
-        try:
-            # Leer el archivo subido
-            bytes_data = uploaded_file.getvalue()
-            pat_data = json.loads(bytes_data.decode('utf-8'))
-            
-            # Revalidar que el archivo subido no sea vacío
-            if not pat_data or pat_data.get('problema') is None:
-                 st.sidebar.error("❌ El archivo JSON está vacío o es inválido.")
-                 return {
-                    "problema": None, 
-                    "problema_borrador": None,
-                    "proposito": None, 
-                    "proposito_borrador": None,
-                    "componentes_final": None,
-                    "componentes_borrador": None,
-                    "componentes_actividades": []
-                }
-                 
-            st.session_state['drive_status'] = f"✅ Avance '{uploaded_file.name}' cargado exitosamente."
-            return pat_data
-            
-        except Exception as e:
-            st.sidebar.error(f"❌ Error al cargar el archivo: {e}")
-            return {
-                "problema": None, 
-                "problema_borrador": None,
-                "proposito": None, 
-                "proposito_borrador": None,
-                "componentes_final": None,
-                "componentes_borrador": None,
-                "componentes_actividades": []
-            }
     
-    # Si no hay archivo subido, inicializa un PAT vacío.
-    st.session_state['drive_status'] = "⚠️ Persistencia: Esperando que cargue un avance o inicie un nuevo PAT."
-    # Inicializa todas las claves de borrador/final que usaremos en las fases
-    return {
-        "problema": None, 
-        "problema_borrador": None,
-        "proposito": None, 
-        "proposito_borrador": None,
-        "componentes_final": None,
-        "componentes_borrador": None,
+    # Definición del estado inicial vacío
+    empty_state = {
+        "problema": None, "problema_borrador": None,
+        "proposito": None, "proposito_borrador": None,
+        "componentes_final": None, "componentes_borrador": None,
         "componentes_actividades": []
     }
 
+    if uploaded_file is not None:
+        try:
+            bytes_data = uploaded_file.getvalue()
+            full_state = json.loads(bytes_data.decode('utf-8'))
+            
+            # Validar y cargar el avance metodológico
+            pat_data = full_state.get('pat_data', empty_state)
+            
+            # Cargar el historial de mensajes
+            messages = full_state.get('messages', [])
+            
+            if not pat_data or pat_data.get('problema') is None and not messages:
+                 st.sidebar.error("❌ El archivo JSON está vacío o es inválido.")
+                 return empty_state, []
+                 
+            # Si la carga es exitosa, restauramos los mensajes y la fase actual en la sesión
+            st.session_state['messages'] = messages
+            st.session_state['current_phase'] = full_state.get('current_phase', 'inicio')
+            
+            st.session_state['drive_status'] = f"✅ Avance '{uploaded_file.name}' cargado exitosamente."
+            return pat_data, messages
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Error al cargar el archivo: {e}")
+            return empty_state, []
+    
+    st.session_state['drive_status'] = "⚠️ Persistencia: Esperando que cargue un avance o inicie un nuevo PAT."
+    # Si no hay archivo subido, retorna el estado vacío y una lista de mensajes vacía
+    return empty_state, []
 
 # --------------------------------------------------------------------------
 # Z. LÓGICA DE FASES (Maneja el flujo secuencial y didáctico)
@@ -427,7 +463,8 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         1.  **Explica didácticamente** qué es el Problema Central y su estructura (población + situación no deseada).
         2.  Usando el Reglamento Interior (RAG), **valida brevemente** si el problema está dentro de las atribuciones de la UR.
         3.  Usando la Guía Metodológica (RAG), evalúa el enunciado. Si la redacción del usuario es correcta, **confirma que es una redacción válida y ajusta la sintaxis si es necesario**. Si el enunciado incumple reglas (es ausencia de servicio, o incluye soluciones), propón una redacción ajustada (Opción A, B).
-        4.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. (Ej: Responde 'Acepto la opción A' o 'Propongo la siguiente corrección...'). **NO AVANCES A CAUSAS/EFECTOS.**
+        4.  **Pregunta al usuario** si está de acuerdo con la validación y la redacción final, o si desea modificarla. **IMPORTANTE: El Problema Central definitivo DEBE ser copiado y pegado o redactado por el usuario en su próxima respuesta.**
+        5.  Instrucción de Respuesta: Responde con la redacción completa elegida o propuesta. **NO AVANCES A CAUSAS/EFECTOS.**
         """
         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
         st.session_state.current_phase = 'Diagnostico_Problema_Validacion'
@@ -437,100 +474,17 @@ def handle_phase_logic(user_prompt: str, user_area: str):
     # ----------------------------------------------------------------------
     elif current_phase == 'Diagnostico_Problema_Validacion':
         
-        # --- FIX: RECUPERACIÓN DE REDACCIÓN COMPLETA ---
-        
-        # 1. Intentar ver si el usuario solo puso una letra (a, b, c)
-        opcion_letra = user_prompt.strip().lower()
-        if opcion_letra in ['a', 'b', 'c']:
-            # Si solo puso la letra, buscamos en los mensajes anteriores la redacción
-            redaccion_completa = None
+        # Si llegamos aquí, asumimos que el usuario proporcionó la redacción completa o la corrigió.
+        st.session_state.pat_data['problema'] = user_prompt
             
-            # Recorrer el historial para encontrar la respuesta anterior del asistente que contenía las opciones
-            for message in reversed(st.session_state.messages):
-                if message["role"] == "assistant" and "opción a" in message["content"].lower():
-                    # Usar una regex simple para encontrar la redacción de la opción elegida
-                    match = re.search(rf'opción {opcion_letra}.*?(.*?)(?=\n\n|\nOpc|FIN_OPCIONES)', message["content"], re.IGNORECASE | re.DOTALL)
-                    if match:
-                        # Limpiar y guardar la redacción completa, quitando títulos o formato extra
-                        redaccion_completa = re.sub(r'\(enfoque.*?\)|redacción ajustada:', '', match.group(1)).strip()
-                        break
-            
-            if redaccion_completa:
-                # Si se recuperó la redacción, la guardamos y forzamos la confirmación en el siguiente prompt
-                st.session_state.pat_data['problema'] = redaccion_completa
-                st.session_state.pat_data['problema_borrador'] = redaccion_completa # Lo usamos para el contexto del siguiente paso
-                
-                query_llm = f"""
-                **FASE ACTUAL: Problema Central (Confirmación de Redacción).** {system_context_rag}
-                
-                Consultando el historial, has elegido la **Opción {opcion_letra.upper()}**.
-                La redacción es: **"{redaccion_completa}"**.
-
-                Para asegurar que tu avance se guarde correctamente en el PAT, necesito que **CONFIRMES esta redacción como el Problema Central definitivo**.
-                
-                **Instrucción:** Simplemente responde: **"Confirmo este Problema Central"** para avanzar al Análisis Causal.
-                """
-                response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
-                # Mantenemos la fase para que el usuario confirme la redacción en el siguiente turno.
-                st.session_state.current_phase = 'Diagnostico_Problema_Validacion_Completa' 
-                return response_content # Retornamos y esperamos la confirmación
-
-            else:
-                 # Si la recuperación de la redacción falló, le pedimos al usuario que la escriba.
-                query_llm = f"""
-                **FASE ACTUAL: Problema Central (Confirmación fallida).** {system_context_rag}
-                
-                Has seleccionado la **Opción {opcion_letra.upper()}**. No pude recuperar la redacción completa de esa opción.
-                
-                Para evitar errores en el registro, por favor, **COPIA Y PEGA la redacción completa** del Problema Central que has elegido o propuesto.
-                """
-                response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
-                # Mantenemos la fase para que el usuario escriba la redacción.
-                st.session_state.current_phase = 'Diagnostico_Problema_Validacion_Completa' 
-                return response_content # Retornamos y esperamos la redacción
-
-        # 2. Si el usuario proporcionó una redacción completa (no es 'a', 'b', o 'c')
-        else:
-            # Guardamos el prompt del usuario directamente como problema final
-            st.session_state.pat_data['problema'] = user_prompt
-            
-            # Pasamos a la siguiente fase real de generación de árbol
-            query_llm = f"""
-            **FASE ACTUAL: Problema Central (Confirmado).** {system_context_rag}
-            El Problema Central FINAL confirmado es: "{user_prompt}".
-            
-            Como Enlace Senior de Progob: 
-            1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
-            2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
-            3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
-            4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
-            """
-            response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
-            # TRANSICIÓN A LA FASE: VALIDACIÓN DEL ÁRBOL
-            st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
-            return response_content
-    
-    # ----------------------------------------------------------------------
-    # FASE 2.5: PROBLEMA CENTRAL - RECUPERACIÓN DE REDACCIÓN COMPLETA
-    # ----------------------------------------------------------------------
-    elif current_phase == 'Diagnostico_Problema_Validacion_Completa':
-        
-        # Si el usuario responde 'Confirmo este Problema Central', usamos lo que ya guardamos en 'problema' en el paso anterior.
-        if "confirmo" in user_prompt.lower() and st.session_state.pat_data.get('problema'):
-            problema_final = st.session_state.pat_data.get('problema')
-        else:
-            # Si el usuario corrige o nos da la redacción que le faltó, guardamos ese nuevo prompt.
-            problema_final = user_prompt
-            st.session_state.pat_data['problema'] = problema_final
-        
-        # Ahora que tenemos el problema final, generamos el Árbol.
+        # Pasamos a la siguiente fase real de generación de árbol
         query_llm = f"""
-        **FASE ACTUAL: Problema Central (Validación y Árbol).** {system_context_rag}
-        El Problema Central FINAL confirmado es: "{problema_final}".
+        **FASE ACTUAL: Problema Central (Confirmado).** {system_context_rag}
+        El Problema Central FINAL confirmado es: "{user_prompt}".
         
         Como Enlace Senior de Progob: 
         1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
-        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
+        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas y la diferencia entre Causas Directas e Indirectas.
         3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). Preséntalos en una tabla estructurada y clara.
         4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
@@ -555,7 +509,8 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         1.  **Felicita al usuario** por completar el Análisis Causal.
         2.  **Guía al usuario** a la siguiente fase: **Propósito**. Explica que el Propósito es la imagen en positivo del Problema Central (Objetivo General) y la importancia de la Lógica Vertical.
         3.  Usando el Problema Central ("{problema_final}") y las Actividades Previas (RAG), **propón tres opciones de Propósito** que se deriven directamente de la superación del problema validado (Opciones A, B, C). Deben seguir la sintaxis de la MIR (Beneficiario + verbo en presente + resultado).
-        4.  Instruye al usuario a seleccionar una opción. (Ej: Responde 'A', 'B', 'C' o 'Propongo un Propósito diferente: [tu propuesta]').
+        4.  Instruye al usuario a seleccionar una opción. **IMPORTANTE: El Propósito definitivo DEBE ser copiado y pegado o redactado por el usuario en su próxima respuesta.**
+        5.  Instrucción de Respuesta: Responde con la redacción completa elegida o propuesta.
         """
         response_content = get_llm_response(SYSTEM_PROMPT, query_llm)
         # TRANSICIÓN A LA FASE: DEFINICIÓN DEL PROPÓSITO
@@ -665,7 +620,6 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         # Mapeo de fases y progreso para dar contexto a la IA
         fase_map = {
             'Diagnostico_Problema_Validacion': f"Validación del Problema: **{st.session_state.pat_data.get('problema_borrador', 'N/A')}**",
-            'Diagnostico_Problema_Validacion_Completa': f"Confirmación de redacción del Problema: **{st.session_state.pat_data.get('problema', 'N/A')}**",
             'Diagnostico_Arbol_Validacion': f"Validación del Árbol de Problemas con Problema: **{st.session_state.pat_data.get('problema', 'N/A')}**",
             'Proposito_Validacion': f"Validación del Propósito: **{st.session_state.pat_data.get('proposito_borrador', 'N/A')}**",
             'Componentes_Validacion': f"Validación de Componentes: **{st.session_state.pat_data.get('componentes_borrador', 'N/A')}**"
@@ -703,18 +657,16 @@ def chat_view(user_name, user_area):
     st.subheader(f"Bienvenido(a), {user_name}.")
     
     # --- 1. Inicializar/Cargar estados ---
+    # La función load_pat_progress ahora devuelve pat_data y messages
     if 'pat_data' not in st.session_state:
-        st.session_state.pat_data = load_pat_progress(user_area)
-    
-    if 'messages' not in st.session_state:
-        st.session_state.messages = []
+        st.session_state.pat_data, initial_messages = load_pat_progress(user_area)
+        st.session_state.messages = initial_messages
     
     # Determinar la fase actual basado en los datos cargados
     if 'current_phase' not in st.session_state:
         if st.session_state.pat_data.get('proposito'):
             st.session_state.current_phase = 'Componentes_Definicion'
         elif st.session_state.pat_data.get('problema'):
-            # Si solo hay problema, lo más probable es que tenga que validar el árbol o definir el propósito.
             st.session_state.current_phase = 'Diagnostico_Arbol_Validacion'
         else:
             st.session_state.current_phase = 'inicio'
@@ -723,11 +675,15 @@ def chat_view(user_name, user_area):
         # 🌟 CARGA CRÍTICA DEL CONTEXTO (RAG) - USAMOS LOS RESÚMENES AQUÍ
         st.session_state.area_context = load_area_context(user_area)
         
-        # Generar mensaje de bienvenida solo si estamos iniciando un nuevo flujo
+        # Inicializamos el contenedor de documentos personalizados si no existe
+        if 'custom_docs_content' not in st.session_state:
+            st.session_state['custom_docs_content'] = {}
+        
+        # Generar el mensaje de bienvenida completo SÓLO si la conversación es nueva
         if not st.session_state.messages or st.session_state.current_phase == 'inicio':
             
             if st.session_state.pat_data.get('problema'):
-                 # Mensaje si se cargó un avance
+                 # Lógica para cargar avance (se mantiene)
                  next_phase_text = st.session_state.current_phase.replace('_', ' ')
                  initial_message = f"""
                  ¡Bienvenido de nuevo, **{user_name}**! Hemos cargado tu avance.
@@ -738,46 +694,84 @@ def chat_view(user_name, user_area):
                  Continúa en la fase de **{next_phase_text}**. Ingresa tu siguiente propuesta para avanzar.
                  """
             else:
-                 # Mensaje de inicio de PAT vacío - RESUMIDO Y DESGLOSADO
-                 initial_message = f"""
-                 ¡Hola, **{user_name}**! Soy tu Asesor Senior de Progob. Estamos listos para comenzar la construcción de tu MIR.
+                 # Mensaje de inicio de PAT vacío (Mensaje de diagnóstico completo)
                  
-                 ---
-                 
-                 ### 📋 Base de Conocimiento Cargada (Contexto RAG)
-                 
-                 * **Atribuciones de tu UR ({user_area}):**
-                   > {st.session_state.area_context['atribuciones_resumen']}
-                 
-                 * **Actividades Previas (Referencia Operativa):**
-                   > {st.session_state.area_context['actividades_resumen']}
-                 
-                 * **Guía Metodológica:**
-                   > {st.session_state.area_context['guia_resumen']}
-                   
-                 ---
-                 
-                 ### 🎯 FASE 1: DIAGNÓSTICO (PROBLEMA CENTRAL)
-                
-                 Comencemos con el primer paso de la Metodología de Marco Lógico (MML): el **Problema Central**.
-                
-                 Por favor, ingresa el **Problema Central** que tu área busca resolver este año (el déficit o situación negativa principal).
+                 # Nuevo Prompt para generar el Diagnóstico Inicial Detallado (puntos 1-5)
+                 initial_query = f"""
+                 Genera el mensaje de diagnóstico inicial para la Unidad Responsable '{user_area}'. 
+                 Debes cumplir **estrictamente** los siguientes puntos usando el RAG:
+                 1.  Identifica y explica el ODS (Objetivo de Desarrollo Sostenible) principal al que debe contribuir la UR, basándote en su área y documentos cargados (ODS).
+                 2.  Explica las atribuciones de la UR, citando el Reglamento Interior y la Ley Orgánica (según el RAG).
+                 3.  Presenta el LISTADO COMPLETO de sus actividades previas (del CSV).
+                 4.  Identifica y lista 3 indicadores aplicables del GDM y 3 del Manual de Indicadores para Municipios que debe considerar la UR.
+                 5.  Explica brevemente qué es la Metodología de Marco Lógico (MML), que su primer paso es el **Problema Central**, qué es el Problema Central y su estructura, y el por qué usaremos **microfases** (validación obligatoria del usuario).
                  """
+                 initial_response = get_llm_response(SYSTEM_PROMPT, initial_query)
+                 st.session_state.messages.append({"role": "assistant", "content": initial_response})
                  st.session_state.current_phase = 'Diagnostico_Problema_Definicion'
-            
-            st.session_state.messages.append({"role": "assistant", "content": initial_message})
+                 # Se hace rerun para que el chat se muestre con el primer mensaje
+                 st.rerun()
+
+
+    # -----------------------------------------------------------------
+    # SIDEBAR: BOTONES DE PERSISTENCIA Y CARGA DE DOCUMENTOS
+    # -----------------------------------------------------------------
     
-    # -----------------------------------------------------------------
-    # FIX: ASEGURAR QUE EL BOTÓN DE DESCARGA SE RENDERICE AL CARGAR LA PÁGINA SI HAY PROGRESO
-    # -----------------------------------------------------------------
+    st.sidebar.markdown("---")
+    # Botón de Descarga JSON (Persistencia de la sesión)
     if st.session_state.pat_data.get('problema') is not None or st.session_state.pat_data.get('proposito') is not None:
-         # Dibujamos una línea separadora antes del botón de descarga para mejor visualización
-         st.sidebar.markdown("---")
-         # Volvemos a llamar a save_pat_progress para renderizar el botón en el sidebar.
-         # La data ya está cargada en pat_data.
          save_pat_progress(user_area, st.session_state.pat_data)
-    # -----------------------------------------------------------------
-             
+
+    # Botón de Descarga PDF (Artefacto legible)
+    if st.session_state.messages:
+        pdf_bytes = generate_pdf_conversation(st.session_state.messages)
+        st.sidebar.download_button(
+            label="📄 Exportar Conversación a PDF",
+            data=pdf_bytes,
+            file_name=f"conversacion_progob_{user_area}.pdf",
+            mime='application/pdf',
+            help="Descarga una transcripción de la conversación actual."
+        )
+        
+    st.sidebar.markdown("---")
+
+    # UPLOADER DE DOCUMENTOS PERSONALIZADOS
+    uploaded_custom_file = st.sidebar.file_uploader(
+        "📂 Subir Documento Personalizado (PDF/TXT)",
+        type=['pdf', 'txt'],
+        key="custom_doc_uploader",
+        help="Sube su reglamento o lineamientos internos (se usará como contexto RAG)."
+    )
+    
+    if uploaded_custom_file is not None:
+        file_name = uploaded_custom_file.name
+        
+        # Extraemos el texto si es PDF, o leemos si es TXT
+        if file_name.endswith('.pdf'):
+            # Creamos un objeto temporal para pypdf
+            tfile = uploaded_custom_file
+            pdf_reader = pypdf.PdfReader(tfile)
+            content = ""
+            for page in pdf_reader.pages:
+                content += page.extract_text() or ""
+        else: # Asumir .txt
+             content = uploaded_custom_file.getvalue().decode('utf-8')
+        
+        if content and len(content) > 50:
+            if 'custom_docs_content' not in st.session_state:
+                st.session_state['custom_docs_content'] = {}
+            
+            st.session_state['custom_docs_content'][file_name] = content
+            st.sidebar.success(f"✅ Documento '{file_name}' cargado al contexto RAG.")
+            # Reforzamos el mensaje de bienvenida con el nuevo contexto
+            st.session_state.messages.append({"role": "assistant", "content": f"**Progob Nota:** El documento '{file_name}' ha sido incorporado al contexto de conocimiento. Lo usaré para alinear mis respuestas a sus lineamientos internos."})
+            # Limpiamos el uploader para permitir otra subida
+            uploaded_custom_file = None
+        else:
+             st.sidebar.error(f"❌ Error al leer o contenido vacío del documento.")
+
+    st.sidebar.markdown(f"**Documentos Personalizados Cargados:** {len(st.session_state.get('custom_docs_content', []))}")
+    st.sidebar.markdown("---")
     # Muestra el estado de la persistencia (descarga)
     st.sidebar.markdown(f"**Estado de Avance:** {st.session_state.get('drive_status', 'No verificado.')}")
 
@@ -857,11 +851,19 @@ def main():
                 role, name, area = authenticate(username, password, df_users)
                 
                 if role:
+                    # Almacenamos los mensajes iniciales cargados (si aplica)
+                    temp_messages = st.session_state.get('messages', [])
+                    temp_current_phase = st.session_state.get('current_phase', 'inicio')
+                    
                     st.session_state.clear()
+                    
                     st.session_state['authenticated'] = True
                     st.session_state['role'] = role
                     st.session_state['user_name'] = name
                     st.session_state['user_area'] = area
+                    st.session_state['messages'] = temp_messages # Restauramos los mensajes si existían (cargados del JSON)
+                    st.session_state['current_phase'] = temp_current_phase
+                    
                     st.sidebar.success(f"Acceso exitoso. Bienvenido(a), {name}.")
                     st.rerun() 
                 else:
