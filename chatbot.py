@@ -6,7 +6,8 @@ import io
 import requests 
 import re 
 import time 
-from fpdf import FPDF 
+# Eliminamos la dependencia directa de FPDF ya que cambiaremos a TXT
+# from fpdf import FPDF 
 
 # Límite de caracteres para los documentos grandes en el RAG (para no exceder el límite de tokens)
 RAG_CHUNK_SIZE = 16000 
@@ -39,8 +40,10 @@ GDM_FILE = os.path.join(DOCS_DIR, "Cuaderno de trabajo GDM 2025-2027.pdf")
 ODS_FILE = os.path.join(DOCS_DIR, "Indicadores por Objetivo y Meta de los Objetivos de Desarrollo Sostenible.pdf")
 MANUAL_INDICADORES_FILE = os.path.join(DOCS_DIR, "Manual_de_indicadores_para_municipios 20250415.pdf")
 
-# REQUISITO: LEY ORGÁNICA
+# DOCUMENTOS DE PLANEACIÓN SUPERIOR
 LEY_ORGANICA_FILE = os.path.join(DOCS_DIR, "ley organica.pdf")
+PND_FILE = os.path.join(DOCS_DIR, "pnd.pdf")
+PVD_FILE = os.path.join(DOCS_DIR, "PVD.pdf") # Plan Veracruzano de Desarrollo
 
 
 # CLAVE API: Se leerá de st.secrets["deepseek_api_key"]
@@ -56,12 +59,13 @@ SYSTEM_PROMPT = """
 
 **REGLAS DE INTERACCIÓN (CHAT):**
 1.  **Micro-Fases y Validación:** La conversación se basa en micro-fases didácticas. **No permitas avanzar a la siguiente etapa de la MIR (Problema final, Propósito final, Componentes finales) hasta que el usuario haya validado o confirmado el enunciado propuesto o ajustado.**
-2.  **Validación Metodológica:** Cada respuesta que avance o valide un concepto debe incluir una explicación didáctica del concepto (ej. Lógica Vertical, RMAE-T) y, si es posible, opciones de redacción para que el usuario elija o proponga una propia.
-3.  **Contexto Específico (RAG):** Usa las atribuciones y actividades de la Unidad Responsable del usuario ({user_area_context}) para contextualizar las propuestas y validaciones.
-4.  **Alineación Estratégica:** En cada fase, asegúrate de que las propuestas estén alineadas con la **Ley Orgánica**, los **ODS** y los indicadores del **GDM/Manual de Indicadores** cargados en el contexto (RAG).
-5.  **Formato:** Usa Markdown y Tablas para claridad y estructura.
-6.  **Lenguaje Didáctico:** Siempre que introduzcas un concepto nuevo (ej. Causa Directa, Indicador RMAE-T, Lógica Vertical), **proporciona una breve explicación didáctica y un ejemplo práctico relacionado con un servicio público**, asumiendo que el usuario no es experto en metodología.
-7.  **Lenguaje Progob:** Utiliza frases como "Consultando la base de conocimiento...", "Revisando el Reglamento Interior...", "Preguntando a Progob...", o "Según la Guía Técnica...". **Nunca menciones "Deepseek", "LLM" o "Modelo de Lenguaje".**
+2.  **Perspectiva Transversal CRÍTICA:** En cada propuesta (Problema, Componentes, Indicadores), debes asegurar la aplicación de la perspectiva de: **niñas, niños y adolescentes, mujeres, personas de la tercera edad, y grupos vulnerables (discapacidad y LGBTI+)**. Esto debe reflejarse en la desagregación de beneficiarios, el enfoque de las actividades o la redacción de los objetivos.
+3.  **Validación Metodológica:** Cada respuesta que avance o valide un concepto debe incluir una explicación didáctica del concepto (ej. Lógica Vertical, RMAE-T) y, si es posible, opciones de redacción para que el usuario elija o proponga una propia.
+4.  **Contexto Específico (RAG):** Usa las atribuciones y actividades de la Unidad Responsable del usuario ({user_area_context}) para contextualizar las propuestas y validaciones.
+5.  **Alineación Estratégica:** En cada fase, asegúrate de que las propuestas estén alineadas con la **Ley Orgánica**, el **PND**, el **PVD**, los **ODS** y los indicadores del **GDM/Manual de Indicadores** cargados en el contexto (RAG).
+6.  **Formato:** Usa Markdown y Tablas para claridad y estructura.
+7.  **Lenguaje Didáctico:** Siempre que introduzcas un concepto nuevo (ej. Causa Directa, Indicador RMAE-T, Lógica Vertical), **proporciona una breve explicación didáctica y un ejemplo práctico relacionado con un servicio público**, asumiendo que el usuario no es experto en metodología.
+8.  **Lenguaje Progob:** Utiliza frases como "Consultando la base de conocimiento...", "Revisando el Reglamento Interior...", "Preguntando a Progob...", o "Según la Guía Técnica...". **Nunca menciones "Deepseek", "LLM" o "Modelo de Lenguaje".**
 """
 
 # --------------------------------------------------------------------------
@@ -156,7 +160,7 @@ def extract_text_from_pdf(pdf_path):
 def load_area_context(user_area):
     """
     Carga el contexto específico del área del usuario, leyendo PDF y CSV (RAG).
-    Ajustado para cargar Ley Orgánica y desplegar todas las atribuciones/actividades.
+    Ajustado para cargar Ley Orgánica, PND, PVD y desplegar todas las atribuciones/actividades.
     """
     context = {
         "atribuciones": "", "atribuciones_resumen": "No disponible.",
@@ -167,12 +171,16 @@ def load_area_context(user_area):
         "ods_content": "", "ods_resumen": "No cargado.",
         "gdm_content": "", "gdm_resumen": "No cargado.",
         "manual_ind_content": "", "manual_ind_resumen": "No cargado.",
+        "pnd_content": "", "pnd_resumen": "No cargado.",
+        "pvd_content": "", "pvd_resumen": "No cargado.",
     }
     
     # Clave de búsqueda (normalizada)
     search_key = user_area.strip().upper()
 
-    # --- 1. CARGA DE LEY ORGÁNICA ---
+    # --- 1. CARGA DE DOCUMENTOS NORMATIVOS Y DE PLANEACIÓN ---
+    
+    # LEY ORGÁNICA
     full_ley_organica_text = extract_text_from_pdf(LEY_ORGANICA_FILE)
     if "ERROR" not in full_ley_organica_text:
         st.session_state['ley_organica_content'] = full_ley_organica_text[:RAG_CHUNK_SIZE]
@@ -180,8 +188,7 @@ def load_area_context(user_area):
     else:
         context["ley_organica_resumen"] = f"ADVERTENCIA: Ley Orgánica no encontrada o con error. ({full_ley_organica_text})"
 
-
-    # --- 2. CARGA DE REGLAMENTO INTERIOR ---
+    # REGLAMENTO INTERIOR
     full_reglamento_text = extract_text_from_pdf(REGLAMENTO_FILE)
     if "ERROR" not in full_reglamento_text:
         context["reglamento_content"] = full_reglamento_text[:RAG_CHUNK_SIZE]
@@ -189,14 +196,30 @@ def load_area_context(user_area):
         st.session_state['reglamento_content'] = context["reglamento_content"]
     else:
         context["reglamento_resumen"] = f"ADVERTENCIA: Error al cargar el Reglamento. ({full_reglamento_text})"
-    
-    # Combinamos para la inyección RAG del prompt inicial si es necesario
+
+    # PND (Plan Nacional de Desarrollo)
+    full_pnd_text = extract_text_from_pdf(PND_FILE)
+    if "ERROR" not in full_pnd_text:
+        st.session_state['pnd_content'] = full_pnd_text[:RAG_CHUNK_SIZE]
+        context["pnd_resumen"] = f"Plan Nacional de Desarrollo (PND) cargado."
+    else:
+        context["pnd_resumen"] = f"ADVERTENCIA: PND no encontrado o con error. ({full_pnd_text})"
+        
+    # PVD (Plan Veracruzano de Desarrollo)
+    full_pvd_text = extract_text_from_pdf(PVD_FILE)
+    if "ERROR" not in full_pvd_text:
+        st.session_state['pvd_content'] = full_pvd_text[:RAG_CHUNK_SIZE]
+        context["pvd_resumen"] = f"Plan Veracruzano de Desarrollo (PVD) cargado."
+    else:
+        context["pvd_resumen"] = f"ADVERTENCIA: PVD no encontrado o con error. ({full_pvd_text})"
+
+    # Concatenamos texto para la inyección de atribuciones (completo)
     context["atribuciones"] = (
         f"--- Atribuciones Ley Orgánica ---\n{full_ley_organica_text}" + 
         f"\n\n--- Atribuciones Reglamento Interior ---\n{full_reglamento_text}"
     )
 
-    # --- 3. CARGA DE DOCUMENTOS ESTRATÉGICOS (RAG) ---
+    # --- 2. CARGA DE DOCUMENTOS ESTRATÉGICOS (RAG) ---
     docs_to_load = {
         "ods": (ODS_FILE, "Objetivos de Desarrollo Sostenible (ODS)"),
         "gdm": (GDM_FILE, "Guía Desempeño Municipal (GDM)"),
@@ -212,7 +235,7 @@ def load_area_context(user_area):
         else:
              context[f"{key}_resumen"] = f"ADVERTENCIA: {name} no encontrado o con error."
 
-    # --- 4. CARGA Y LISTADO EXHAUSTIVO DE ACTIVIDADES PREVIAS (CSV) ---
+    # --- 3. CARGA Y LISTADO EXHAUSTIVO DE ACTIVIDADES PREVIAS (CSV) ---
     if os.path.exists(ACTIVIDADES_FILE):
         try:
             df_actividades = pd.read_csv(ACTIVIDADES_FILE, encoding='utf-8')
@@ -251,7 +274,12 @@ def load_area_context(user_area):
         context["actividades_resumen"] = f"ADVERTENCIA: Archivo de actividades no encontrado."
     
     # El campo 'atribuciones_resumen' contendrá el texto combinado de todas las fuentes para el prompt
-    context["atribuciones_resumen"] = f"**Reglamento Interior:** {context['reglamento_resumen']}\n**Ley Orgánica:** {context['ley_organica_resumen']}"
+    context["atribuciones_resumen"] = (
+        f"**Reglamento Interior:** {context['reglamento_resumen']}\n"
+        f"**Ley Orgánica:** {context['ley_organica_resumen']}\n"
+        f"**PND:** {context['pnd_resumen']}\n"
+        f"**PVD:** {context['pvd_resumen']}"
+    )
 
 
     return context
@@ -280,6 +308,8 @@ def get_llm_response(system_prompt: str, user_query: str):
     if 'ods_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (ODS) ---\n{st.session_state['ods_content']}"
     if 'gdm_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (GDM) ---\n{st.session_state['gdm_content']}"
     if 'manual_ind_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (MANUAL INDICADORES) ---\n{st.session_state['manual_ind_content']}"
+    if 'pnd_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (PND) ---\n{st.session_state['pnd_content']}"
+    if 'pvd_content' in st.session_state: rag_context += f"\n\n--- CONTEXTO RAG (PVD) ---\n{st.session_state['pvd_content']}"
     
     # Documentos personalizados
     if 'custom_docs_content' in st.session_state:
@@ -349,77 +379,52 @@ def get_llm_response(system_prompt: str, user_query: str):
 
 
 # --------------------------------------------------------------------------
-# B. FUNCIONES DE PERSISTENCIA (LOCAL: DESCARGA/CARGA JSON)
+# B. FUNCIONES DE PERSISTENCIA (LOCAL: DESCARGA/CARGA JSON/TXT)
 # --------------------------------------------------------------------------
 
 def get_pat_file_name(user_area):
     """Genera el nombre de archivo para guardar el avance del PAT."""
     clean_area = re.sub(r'[^\w\s-]', '', user_area.replace(' ', '_'))
-    return f"avance_pat_{clean_area}.json"
+    return f"avance_pat_{clean_area}"
 
 def save_pat_progress(user_area, pat_data):
     """
-    ***ESTA FUNCIÓN YA NO SE USA PARA GUARDAR EL ESTADO METODOLÓGICO.***
-    Solo se usa para la lógica de visualización del botón de PDF/JSON si existiera.
-    Se mantiene en desuso por el momento ya que eliminamos el JSON.
+    Esta función ya no se usa para la lógica de avance (eliminación del JSON).
     """
-    # Esta función se elimina ya que el JSON se suprime
     pass
     
-def generate_pdf_conversation(messages, user_area):
-    """Genera un PDF con la transcripción de la conversación, usando codificación UTF-8."""
+def generate_txt_conversation(messages, user_area):
+    """Genera una transcripción de la conversación en formato TXT/MD."""
     
-    # FIX FPDF: Inicialización simple sin argumentos conflictivos.
-    pdf = FPDF(unit="mm", format="A4", orientation="P") 
+    output = f"--- ASESORÍA PROGOB (MIR) ---\n"
+    output += f"UNIDAD RESPONSABLE: {user_area}\n"
+    output += f"FECHA DE EXPORTACIÓN: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}\n"
+    output += f"--- INICIO DE CONVERSACIÓN ---\n\n"
     
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Transcripción de la Asesoría Progob (MIR)", 0, 1, "C")
-    pdf.set_font("Arial", "", 10)
-    pdf.cell(0, 5, f"Unidad Responsable: {user_area}", 0, 1, "C")
-    pdf.cell(0, 5, f"Fecha de Exportación: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}", 0, 1, "C")
-    pdf.ln(5)
-
     for msg in messages:
         role = msg["role"].upper()
         content = msg["content"]
         
-        pdf.set_font("Arial", "B", 10)
-        pdf.set_fill_color(200, 220, 255) if role == "ASSISTANT" else pdf.set_fill_color(240, 240, 240)
-        role_title = f"--- {role} ---"
-        pdf.cell(0, 7, role_title, 0, 1, 'L', 1)
+        output += f"## {role}:\n"
+        output += content + "\n\n"
         
-        pdf.set_font("Arial", "", 10)
-        
-        content_clean = content.replace('>', '').replace('*', '').replace('•', '-')
-        
-        # Usamos .encode('latin1', 'replace') para manejar cualquier caracter que FPDF no pueda, 
-        # y luego lo decodificamos de vuelta para pasarlo a multi_cell.
-        try:
-            pdf.multi_cell(0, 5, content_clean.encode('latin1', 'replace').decode('latin1'))
-        except Exception as e:
-            pdf.multi_cell(0, 5, "ERROR: Contenido con caracteres no compatibles para PDF.")
-            
-        pdf.ln(2)
-
-    return pdf.output(dest='S').encode('utf-8') 
+    output += f"--- FIN DE CONVERSACIÓN ---\n"
+    
+    # Codificamos a UTF-8 para preservar tildes y eñes
+    return output.encode('utf-8') 
 
 def load_pat_progress(user_area):
     """
-    ***ESTA FUNCIÓN YA NO SE USA PARA CARGAR/GUARDAR ESTADO METODOLÓGICO (JSON).***
-    Ahora solo maneja el uploader de la conversación PDF/JSON para restaurar el historial.
-    Se ha simplificado para solo manejar el uploader.
+    Maneja el uploader para restaurar el historial y el estado.
     """
     
     st.sidebar.markdown("---")
-    # Este uploader ahora permite cargar un archivo JSON o un TXT que contenga la conversación para restaurar el historial.
+    # Este uploader ahora permite cargar un archivo JSON (con estado completo) o un TXT (solo historial)
     uploaded_file = st.sidebar.file_uploader(
         "⬆️ Cargar Conversación Previa (.json / .txt)",
         type=['json', 'txt'],
         key="pat_file_uploader",
-        help="Sube el archivo JSON de avance completo o un archivo .txt para restaurar el historial de chat."
+        help="Sube el archivo JSON de avance completo para restaurar la lógica, o un TXT para restaurar el historial de chat."
     )
     
     # Definición del estado inicial vacío
@@ -454,9 +459,21 @@ def load_pat_progress(user_area):
                  st.rerun() # Forzamos la recarga con el nuevo estado
             
             else: # Asume TXT o formato simple: restaurar solo el historial de mensajes
-                # Esto es un fallback, pero no restaura la lógica de fases.
                 st.sidebar.warning("Solo se cargó el historial de texto. La lógica metodológica (fases) debe reiniciarse.")
-                st.session_state['messages'] = [{"role": "assistant", "content": "Historial restaurado desde TXT. Por favor, define el siguiente paso metodológico."}, {"role": "user", "content": content}]
+                # Creamos un historial simple a partir del texto
+                
+                # Buscamos el inicio de la conversación (para evitar metadata)
+                start_index = content.find("## ASSISTANT:") 
+                
+                if start_index == -1:
+                    # Si no encontramos el formato estructurado, usamos el texto completo como un mensaje
+                    messages = [{"role": "assistant", "content": "Historial restaurado, pero no se pudo parsear el formato estructurado."}, {"role": "user", "content": content}]
+                else:
+                    # Parseo simple para restaurar el historial (puede ser impreciso, es mejor que el usuario suba JSON)
+                    # Aquí solo guardaremos la última parte para reiniciar el chat
+                    messages = [{"role": "assistant", "content": "Historial de conversación restaurado. Por favor, reintroduce el Problema Central definitivo."}]
+                
+                st.session_state['messages'] = messages
                 st.session_state['pat_data'] = empty_state
                 st.session_state['current_phase'] = 'Diagnostico_Problema_Definicion' # Reiniciamos la fase.
                 st.rerun()
@@ -523,7 +540,7 @@ def handle_phase_logic(user_prompt: str, user_area: str):
         
         Como Enlace Senior de Progob: 
         1.  **Confirma la recepción** del Problema Central definitivo de manera didáctica, citándolo.
-        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas  y la diferencia entre Causas Directas e Indirectas.
+        2.  **Explica didácticamente** qué es el Análisis Causal / Árbol de Problemas y la diferencia entre Causas Directas e Indirectas.
         3.  Usando el Problema Central confirmado y la Guía Metodológica (RAG), **genera** 3 Causas Directas y al menos 2 Causas Indirectas por cada una, explorando enfoques diferentes (social, institucional, operativo, etc.). **Asegúrate de generar los Efectos Directos e Indirectos correspondientes al problema central** y preséntalos en una tabla estructurada y clara.
         4.  **Pregunta al usuario** si está de acuerdo con la lógica causal del Árbol propuesto (Causas y Efectos) antes de avanzar a la transformación en Propósito/Objetivos. (Ej: Responde 'Acepto el Árbol' o 'Propongo la siguiente modificación a la causa 2...'). **NO AVANCES A PROPÓSITO.**
         """
@@ -740,14 +757,16 @@ def chat_view(user_name, user_area):
                  # Mensaje de inicio de PAT vacío (Mensaje de diagnóstico completo)
                  
                  # Nuevo Prompt para generar el Diagnóstico Inicial Detallado (puntos 1-5)
+                 # Se agrega la instrucción de buscar alineación PND y PVD y proponer problemas.
                  initial_query = f"""
                  Genera el mensaje de diagnóstico inicial para la Unidad Responsable '{user_area}'. 
                  Debes cumplir **estrictamente** los siguientes puntos usando el RAG:
-                 1.  Identifica y explica el ODS (Objetivo de Desarrollo Sostenible) principal al que debe contribuir la UR, basándote en su área y documentos cargados (ODS).
-                 2.  Explica las atribuciones de la UR, citando el Reglamento Interior y la Ley Orgánica (contextos RAG).
-                 3.  Presenta el LISTADO COMPLETO de sus actividades previas (del CSV).
-                 4.  Identifica y lista 3 indicadores aplicables del GDM y 3 del Manual de Indicadores para Municipios que debe considerar la UR.
-                 5.  Explica brevemente qué es la Metodología de Marco Lógico (MML), que su primer paso es el **Problema Central**, qué es el Problema Central y su estructura, y el por qué usaremos **microfases** (validación obligatoria del usuario). Finalmente, **propón 3 opciones de Problema Central** basados en el análisis de atribuciones y actividades (Opciones A, B, C).
+                 1.  Identifica y explica de forma exhaustiva todos los **ODS (Objetivos de Desarrollo Sostenible)** vinculados al trabajo de la UR.
+                 2.  Identifica y explica de forma exhaustiva las prioridades vinculadas al área de la UR en el **Plan Nacional de Desarrollo (PND)** y en el **Plan Veracruzano de Desarrollo (PVD)** (contextos RAG).
+                 3.  Explica y lista las **atribuciones completas** de la UR, citando el Reglamento Interior y la Ley Orgánica.
+                 4.  Presenta el **LISTADO COMPLETO** de sus actividades previas (del CSV).
+                 5.  Identifica y lista 3 indicadores aplicables del **GDM** y 3 del **Manual de Indicadores para Municipios** que debe considerar la UR.
+                 6.  Explica brevemente qué es la Metodología de Marco Lógico (MML), que su primer paso es el **Problema Central**, qué es el Problema Central y su estructura, y el por qué usaremos **microfases** (validación obligatoria del usuario). Finalmente, **propón 3 opciones de Problema Central** basados en el análisis de atribuciones y actividades (Opciones A, B, C).
                  """
                  # Ejecutamos el LLM para obtener el generador de respuesta
                  response_generator = get_llm_response(SYSTEM_PROMPT, initial_query)
@@ -770,16 +789,17 @@ def chat_view(user_name, user_area):
     
     st.sidebar.markdown("---")
     
-    # Botón de Descarga PDF (Artefacto legible)
+    # Botón de Descarga TXT (Conversación completa)
     if st.session_state.messages:
-        pdf_bytes = generate_pdf_conversation(st.session_state.messages, user_area)
-        # **FIX DUPLICATE ID:** Añadimos key explícita
+        txt_content = generate_txt_conversation(st.session_state.messages, user_area)
+        # Usamos el nombre del archivo generado
+        file_name_base = get_pat_file_name(user_area)
         st.sidebar.download_button(
-            label="📄 Exportar Conversación a PDF",
-            data=pdf_bytes,
-            file_name=f"conversacion_progob_{user_area}.pdf",
-            mime='application/pdf',
-            help="Descarga una transcripción de la conversación actual.",
+            label="📄 Exportar Conversación (.txt)",
+            data=txt_content,
+            file_name=f"{file_name_base}_conversacion.txt",
+            mime='text/plain',
+            help="Descarga el historial de la conversación para reanudar el trabajo o copiar a Word.",
             key="pdf_export_button" 
         )
         
